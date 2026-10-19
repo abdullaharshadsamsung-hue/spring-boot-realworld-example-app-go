@@ -65,8 +65,12 @@ func (p *UpdateUserParam) UnmarshalJSON(data []byte) error {
 		return fmt.Errorf("app: decode update user param: %w", err)
 	}
 	raw, ok := envelope[userRootKey]
-	if !ok || bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+	if !ok {
 		return ErrMissingUserRoot
+	}
+	if bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		*p = UpdateUserParam{}
+		return nil
 	}
 	var f updateUserFields
 	if err := json.Unmarshal(raw, &f); err != nil {
