@@ -1,86 +1,100 @@
-// Package httpapi contains the REST transport layer of the RealWorld API:
-// handler adapters, error-to-status mapping and JSON response helpers.
 package httpapi
 
 import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"time"
 )
 
+// invalidAuthenticationMessage is the fixed, deliberately vague message for
+// every failed login. It never says whether the email or the password was
+// wrong, so callers cannot use it to find out which emails are registered.
+const invalidAuthenticationMessage = "invalid email or password"
+
+// ErrInvalidAuthentication signals a failed authentication attempt, such as
+// an unknown email or a wrong password. Its message is always
+// "invalid email or password".
+//
+// Services and handlers may return it directly or wrap it, for example
+// fmt.Errorf("login %s: %w", email, httpapi.ErrInvalidAuthentication).
+// Any error for which errors.Is(err, ErrInvalidAuthentication) holds is
+// rendered as 422 Unprocessable Entity with the body
+// {"message":"invalid email or password"}.
+//
+// MIGRATION_NOTE: the source used an unchecked InvalidAuthenticationException
+// that CustomizeExceptionHandler turned into a 422 response. In Go it is a
+// returned sentinel error, mapped to HTTP by ErrorHandlerFunc and WriteError.
+// The agreed plan also names core.ErrInvalidCredentials for this case. If
+// that symbol exists, MANUAL REVIEW: alias one sentinel to the other, or add
+// it to the errors.Is check in invalidAuthenticationBody, so only one
+// sentinel is in use.
+var ErrInvalidAuthentication = errors.New(invalidAuthenticationMessage)
+
 // ErrResourceNotFound signals that a requested resource (article, comment,
-// profile, user, ...) does not exist. It carries no payload, mirroring the
-// source's argument-less ResourceNotFoundException.
-//
-// Lower layers may return it directly or wrap it
-// (fmt.Errorf("article %q: %w", slug, httpapi.ErrResourceNotFound)); any error
-// for which errors.Is(err, ErrResourceNotFound) holds is rendered as
-// 404 Not Found.
-//
-// MIGRATION_NOTE: the source relied on @ResponseStatus(NOT_FOUND) plus Spring's
-// ResponseStatusExceptionResolver. In Go the mapping is explicit: handlers
-// return the error and HandlerFunc/WriteError translate it to a status.
+// profile, ...) does not exist. Any error for which
+// errors.Is(err, ErrResourceNotFound) holds is rendered as 404 Not Found.
 var ErrResourceNotFound = errors.New("resource not found")
 
-// timestampLayout matches the ISO-8601 offset format used by Spring Boot's
-// default error attributes.
-const timestampLayout = "2006-01-02T15:04:05.000-07:00"
+// ErrorHandlerFunc is an HTTP handler that returns an error instead of
+// writing error responses itself. Its ServeHTTP method maps known sentinel
+// errors to the matching HTTP response, in place of Spring's
+// @ExceptionHandler / @ResponseStatus handling.
+type ErrorHandlerFunc func(w http.ResponseWriter, r *http.Request) error
 
-// now is the clock used for error timestamps; overridable in tests.
-var now = time.Now
-
-// ErrorBody is the Spring-Boot-style default error response body.
-type ErrorBody struct {
-	Timestamp string `json:"timestamp"`
-	Status    int    `json:"status"`
-	Error     string `json:"error"`
-	Message   string `json:"message"`
-	Path      string `json:"path"`
+// ServeHTTP implements http.Handler. It calls f and, if f returns an error,
+// writes the matching error response with WriteError.
+func (f ErrorHandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := f(w, r); err != nil {
+		WriteError(w, err)
+	}
 }
 
-// StatusFor returns the HTTP status code an error escaping a handler maps to.
-// A nil error maps to 200 OK; unrecognised errors map to 500.
-func StatusFor(err error) int {
+// WriteError writes the HTTP response for err:
+//
+//   - ErrInvalidAuthentication → 422 {"message":"invalid email or password"}
+//   - ErrNoAuthorization       → 403 (delegated to WriteAuthzError)
+//   - ErrResourceNotFound      → 404 with an empty body
+//   - anything else            → 500 with a generic message, so internal
+//     details are never exposed
+//
+// A nil err writes nothing.
+func WriteError(w http.ResponseWriter, err error) {
+	if err == nil {
+		return
+	}
+	if body, ok := invalidAuthenticationBody(err); ok {
+		writeErrorBody(w, http.StatusUnprocessableEntity, body)
+		return
+	}
 	switch {
-	case err == nil:
-		return http.StatusOK
+	case errors.Is(err, ErrNoAuthorization):
+		// MIGRATION_NOTE: assumes WriteAuthzError(w, err) from
+		// no_authorization.go. MANUAL REVIEW: check its signature.
+		WriteAuthzError(w, err)
 	case errors.Is(err, ErrResourceNotFound):
-		return http.StatusNotFound
+		w.WriteHeader(http.StatusNotFound)
 	default:
-		return http.StatusInternalServerError
+		writeErrorBody(w, http.StatusInternalServerError,
+			map[string]string{"message": http.StatusText(http.StatusInternalServerError)})
 	}
 }
 
-// WriteError renders err as a Spring-style JSON error response. It is the
-// fallback used when no more specific handling intercepted the error.
-func WriteError(w http.ResponseWriter, r *http.Request, err error) {
-	status := StatusFor(err)
-	if status == http.StatusOK {
-		status = http.StatusInternalServerError
+// invalidAuthenticationBody reports whether err is a failed-authentication
+// error. If it is, it also returns the response body for it. The message is
+// always the fixed string, even when the error was wrapped with extra
+// context, so the response never leaks which credential was wrong.
+func invalidAuthenticationBody(err error) (map[string]string, bool) {
+	if !errors.Is(err, ErrInvalidAuthentication) {
+		return nil, false
 	}
-	body := ErrorBody{
-		Timestamp: now().Format(timestampLayout),
-		Status:    status,
-		Error:     http.StatusText(status),
-		// Spring Boot (2.3+) omits exception messages by default; the source
-		// exception has no message anyway.
-		Message: "",
-		Path:    r.URL.Path,
-	}
+	return map[string]string{"message": invalidAuthenticationMessage}, true
+}
+
+// writeErrorBody writes body as JSON with the given status code. If encoding
+// fails after the header has been sent, the status cannot be changed, so the
+// failure is dropped.
+func writeErrorBody(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
-}
-
-// HandlerFunc is an http handler that may return an error instead of writing
-// an error response itself. Returned errors are rendered with WriteError,
-// replicating exceptions "escaping" a Spring MVC controller.
-type HandlerFunc func(w http.ResponseWriter, r *http.Request) error
-
-// ServeHTTP implements http.Handler.
-func (h HandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := h(w, r); err != nil {
-		WriteError(w, r, err)
-	}
 }
