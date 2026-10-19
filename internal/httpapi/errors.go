@@ -1,66 +1,73 @@
+// Package httpapi contains the REST transport layer: handlers, middleware and
+// the centralised error-to-response mapping that replaces Spring's
+// @RestControllerAdvice CustomizeExceptionHandler.
 package httpapi
 
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
+	"sort"
+	"strconv"
+	"strings"
+
+	"github.com/rs/zerolog"
+
+	"migrated-app/internal/core"
 )
 
-// ErrResourceNotFound signals that the requested resource (article, comment,
-// profile, ...) does not exist. Any error for which
-// errors.Is(err, ErrResourceNotFound) holds is rendered as 404 Not Found with
-// a Spring-style error body.
+// sentinelError is a string-backed error type so package sentinels can be
+// declared as constants and compared with errors.Is.
+type sentinelError string
+
+// Error implements the error interface.
+func (e sentinelError) Error() string { return string(e) }
+
+// Sentinel errors produced by the REST layer.
+const (
+	// ErrResourceNotFound replaces ResourceNotFoundException and maps to 404.
+	ErrResourceNotFound sentinelError = "resource not found"
+	// ErrInvalidAuthentication replaces InvalidAuthenticationException
+	// (wrong email/password on login) and maps to 422 with a message body.
+	ErrInvalidAuthentication sentinelError = "invalid email or password"
+)
+
+// FieldErrors groups validation messages by field name. It is the Go
+// equivalent of a list of FieldErrorResource values, already in the shape
+// produced by the source's ErrorResource serializer:
 //
-// It replaces the source's ResourceNotFoundException, which used
-// @ResponseStatus(NOT_FOUND).
-var ErrResourceNotFound = errors.New("resource not found")
-
-// ErrInvalidAuthentication signals a failed login, such as an unknown email or
-// a wrong password. It is rendered as 422 Unprocessable Entity with the body
-// {"message":"invalid email or password"}, which matches the source's
-// CustomizeExceptionHandler.handleInvalidAuthentication.
-var ErrInvalidAuthentication = errors.New("invalid email or password")
-
-// FieldErrors maps a request field name to the validation messages reported
-// for it. It is the Go replacement for Spring Validation's Errors object
-// (BindingResult, MapBindingResult, ...) as used by InvalidRequestException.
+//	{"errors": {"email": ["can't be empty", "should be an email"]}}
 type FieldErrors map[string][]string
 
-// Add records message as a validation failure for field.
-// Messages are kept in the order they were added.
-func (f FieldErrors) Add(field, message string) {
-	f[field] = append(f[field], message)
+// Add records msg against field. The receiver must be non-nil.
+func (f FieldErrors) Add(field, msg string) {
+	f[field] = append(f[field], msg)
 }
 
-// HasErrors reports whether at least one field failure has been recorded.
+// HasErrors reports whether any field error has been recorded.
 func (f FieldErrors) HasErrors() bool {
 	return len(f) > 0
 }
 
-// FieldErrorer is implemented by any error that carries field-level
-// validation failures. WriteError renders all such errors as
-// 422 {"errors":{field:[messages]}}.
-//
-// Because this is an interface, validation errors from other packages (for
-// example a *app.ValidationError) can be rendered without httpapi importing
-// those packages. They only need to expose a FieldErrors() method.
+// FieldErrorer is implemented by any error that carries per-field validation
+// failures. It unifies InvalidRequestException, MethodArgumentNotValidException
+// and ConstraintViolationException from the source: all three produce HTTP 422
+// with an ErrorResource body.
 type FieldErrorer interface {
 	error
-	FieldErrors() map[string][]string
+	// FieldErrors returns the validation failures grouped by field.
+	FieldErrors() FieldErrors
 }
 
-// InvalidRequestError is returned when request input fails validation, for
-// example a duplicated username or email or a blank required field. It wraps
-// the collected field errors.
-//
-// It replaces the source's unchecked InvalidRequestException(Errors).
-// Instead of throwing, Go code returns it as an ordinary error.
+// InvalidRequestError replaces InvalidRequestException. It is returned by
+// handlers and validators when request content fails validation.
 type InvalidRequestError struct {
 	errs FieldErrors
 }
 
-// NewInvalidRequestError builds an InvalidRequestError that wraps errs.
-// A nil map is replaced with an empty one, so Errors never returns nil.
+// NewInvalidRequestError wraps errs in an InvalidRequestError. A nil map is
+// replaced by an empty one so the JSON body is always an object.
 func NewInvalidRequestError(errs FieldErrors) *InvalidRequestError {
 	if errs == nil {
 		errs = FieldErrors{}
@@ -68,101 +75,175 @@ func NewInvalidRequestError(errs FieldErrors) *InvalidRequestError {
 	return &InvalidRequestError{errs: errs}
 }
 
-// Error returns the error message. As in the source, which called super(""),
-// the message is intentionally empty. The details are in Errors().
-//
-// MIGRATION_NOTE: an empty Error() string matches the source exactly, but it
-// makes plain log lines uninformative. Callers that log this error should also
-// log Errors(). Manual review: decide whether a non-empty message is preferable.
+// Error implements the error interface.
 func (e *InvalidRequestError) Error() string {
-	return ""
+	if e == nil || len(e.errs) == 0 {
+		return "invalid request"
+	}
+	fields := make([]string, 0, len(e.errs))
+	for field := range e.errs {
+		fields = append(fields, field)
+	}
+	sort.Strings(fields)
+	parts := make([]string, 0, len(fields))
+	for _, field := range fields {
+		parts = append(parts, field+": "+strings.Join(e.errs[field], ", "))
+	}
+	return "invalid request: " + strings.Join(parts, "; ")
 }
 
-// Errors returns the field errors supplied at construction.
+// Errors returns the grouped field errors (InvalidRequestException.getErrors).
 func (e *InvalidRequestError) Errors() FieldErrors {
+	if e == nil {
+		return FieldErrors{}
+	}
 	return e.errs
 }
 
 // FieldErrors implements FieldErrorer.
-func (e *InvalidRequestError) FieldErrors() map[string][]string {
-	return e.errs
+func (e *InvalidRequestError) FieldErrors() FieldErrors {
+	return e.Errors()
 }
 
-// validationBody is the 422 response body for field validation failures.
-type validationBody struct {
-	Errors map[string][]string `json:"errors"`
+var _ FieldErrorer = (*InvalidRequestError)(nil)
+
+// ErrorBody is the JSON body written for validation failures; it replaces
+// ErrorResource and its custom serializer.
+type ErrorBody struct {
+	Errors FieldErrors `json:"errors"`
 }
 
-// messageBody is the 422 response body for authentication failures.
+// messageBody is the JSON body for authentication failures; it replaces the
+// double-brace-initialised HashMap {"message": ...} from the source.
 type messageBody struct {
 	Message string `json:"message"`
 }
 
-// WriteError renders err as an HTTP error response. It replaces the source's
-// @RestControllerAdvice CustomizeExceptionHandler and Spring's
-// @ResponseStatus resolution:
+// StatusCoder may be implemented by errors defined elsewhere (for example the
+// no-authorization or unauthenticated errors) to choose their own HTTP status.
+type StatusCoder interface {
+	// HTTPStatus returns the status code to send for this error.
+	HTTPStatus() int
+}
+
+// ParamFromPropertyPath reproduces CustomizeExceptionHandler.getParam: a
+// ConstraintViolation property path such as "createArticle.param.title" has
+// its first two segments (method and parameter name) stripped. A single
+// segment is returned unchanged; exactly two segments yield "".
+func ParamFromPropertyPath(path string) string {
+	splits := strings.Split(path, ".")
+	if len(splits) == 1 {
+		return path
+	}
+	return strings.Join(splits[2:], ".")
+}
+
+// isBadRequest reports whether err is a malformed-body or bad-query error.
+func isBadRequest(err error) bool {
+	var syntaxErr *json.SyntaxError
+	var typeErr *json.UnmarshalTypeError
+	var numErr *strconv.NumError
+	switch {
+	case errors.As(err, &syntaxErr),
+		errors.As(err, &typeErr),
+		errors.As(err, &numErr),
+		errors.Is(err, io.EOF),
+		errors.Is(err, io.ErrUnexpectedEOF):
+		return true
+	}
+	return false
+}
+
+// StatusFor maps an error returned by a handler to its HTTP status code.
+func StatusFor(err error) int {
+	if err == nil {
+		return http.StatusOK
+	}
+	var fe FieldErrorer
+	if errors.As(err, &fe) {
+		return http.StatusUnprocessableEntity
+	}
+	if errors.Is(err, ErrInvalidAuthentication) {
+		return http.StatusUnprocessableEntity
+	}
+	var sc StatusCoder
+	if errors.As(err, &sc) {
+		return sc.HTTPStatus()
+	}
+	if errors.Is(err, ErrResourceNotFound) || errors.Is(err, core.ErrNotFound) {
+		return http.StatusNotFound
+	}
+	if isBadRequest(err) {
+		return http.StatusBadRequest
+	}
+	return http.StatusInternalServerError
+}
+
+// writeJSON encodes v with the given status and application/json content type.
+func writeJSON(w http.ResponseWriter, r *http.Request, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	if err := json.NewEncoder(w).Encode(v); err != nil {
+		logger := zerolog.Ctx(r.Context())
+		logger.Error().Err(err).Msg("httpapi: encode error response")
+	}
+}
+
+// WriteError converts err into an HTTP response. It is the single dispatch
+// point replacing every @ExceptionHandler in CustomizeExceptionHandler:
 //
-//   - FieldErrorer (including *InvalidRequestError) → 422 {"errors":{field:[msgs]}}
-//   - ErrInvalidAuthentication                       → 422 {"message":"invalid email or password"}
-//   - everything else                                → StatusFor(err) with a Spring-style ErrorBody
-//
-// A nil err writes nothing.
+//   - FieldErrorer (InvalidRequestException, @Valid failures,
+//     ConstraintViolationException) → 422 {"errors": {...}}
+//   - ErrInvalidAuthentication → 422 {"message": "..."}
+//   - StatusCoder → its status; 401 is written with an empty body
+//   - not found → 404, malformed body / bad query int → 400
+//   - anything else → logged, 500
 func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	if err == nil {
 		return
 	}
-
 	var fe FieldErrorer
 	if errors.As(err, &fe) {
-		fields := fe.FieldErrors()
-		if fields == nil {
-			fields = map[string][]string{}
+		errs := fe.FieldErrors()
+		if errs == nil {
+			errs = FieldErrors{}
 		}
-		writeErrorJSON(w, http.StatusUnprocessableEntity, validationBody{Errors: fields})
+		writeJSON(w, r, http.StatusUnprocessableEntity, ErrorBody{Errors: errs})
 		return
 	}
-
 	if errors.Is(err, ErrInvalidAuthentication) {
-		writeErrorJSON(w, http.StatusUnprocessableEntity, messageBody{Message: ErrInvalidAuthentication.Error()})
+		writeJSON(w, r, http.StatusUnprocessableEntity, messageBody{Message: err.Error()})
 		return
 	}
 
 	status := StatusFor(err)
-	message := err.Error()
-	if status >= http.StatusInternalServerError {
-		// Do not leak internal error details to clients.
-		message = http.StatusText(status)
+	switch status {
+	case http.StatusUnauthorized:
+		w.WriteHeader(status)
+	case http.StatusInternalServerError:
+		logger := zerolog.Ctx(r.Context())
+		logger.Error().Err(err).Str("path", r.URL.Path).Msg("httpapi: unhandled error")
+		// MIGRATION_NOTE: Spring's ResponseEntityExceptionHandler would emit its
+		// default error body; we emit a generic message to avoid leaking internals.
+		writeJSON(w, r, status, messageBody{Message: http.StatusText(status)})
+	default:
+		writeJSON(w, r, status, messageBody{Message: err.Error()})
 	}
-	path := ""
-	if r != nil && r.URL != nil {
-		path = r.URL.Path
-	}
-	writeErrorJSON(w, status, ErrorBody{
-		Timestamp: now().UTC().Format(timestampLayout),
-		Status:    status,
-		Error:     http.StatusText(status),
-		Message:   message,
-		Path:      path,
-	})
 }
 
-// writeErrorJSON writes v as a JSON response with the given status code.
-func writeErrorJSON(w http.ResponseWriter, status int, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	// The status line has already been sent, so an encoding failure can only
-	// mean that the client has gone away. There is nothing useful left to do.
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-// ErrorHandlerFunc is an HTTP handler that returns an error instead of
-// writing error responses itself. Any returned error is rendered with
-// WriteError.
+// ErrorHandlerFunc is an HTTP handler that returns an error instead of writing
+// it. Its ServeHTTP routes any returned error through WriteError, which gives
+// every route the cross-cutting behaviour of @RestControllerAdvice.
 type ErrorHandlerFunc func(w http.ResponseWriter, r *http.Request) error
 
 // ServeHTTP implements http.Handler.
-func (f ErrorHandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	if err := f(w, r); err != nil {
+func (h ErrorHandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	if err := h(w, r); err != nil {
 		WriteError(w, r, err)
 	}
 }
+
+// HandlerFunc is an alias of ErrorHandlerFunc kept for call-site brevity.
+type HandlerFunc = ErrorHandlerFunc
+
+var _ http.Handler = ErrorHandlerFunc(nil)
