@@ -166,9 +166,6 @@ func StatusFor(err error) int {
 	if errors.Is(err, ErrInvalidAuthentication) {
 		return http.StatusUnprocessableEntity
 	}
-	if errors.Is(err, ErrNoAuthorization) {
-		return http.StatusForbidden
-	}
 	var sc StatusCoder
 	if errors.As(err, &sc) {
 		return sc.HTTPStatus()
