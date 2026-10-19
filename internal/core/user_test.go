@@ -1,179 +1,161 @@
 package core
 
 import (
-	"encoding/json"
+	"regexp"
 	"strings"
 	"testing"
 )
 
-func TestFollowRelationZeroValue(t *testing.T) {
-	var r FollowRelation
-	if r.UserID != "" || r.TargetID != "" {
-		t.Fatalf("zero value not empty: %+v", r)
-	}
-	if !r.Equal(FollowRelation{}) {
-		t.Fatalf("zero value should equal FollowRelation{}")
-	}
-}
+var userUUIDv4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-func TestNewFollowRelation(t *testing.T) {
+func TestNewUser(t *testing.T) {
 	tests := []struct {
-		name     string
-		userID   string
-		targetID string
+		name                                  string
+		email, username, password, bio, image string
 	}{
-		{"normal", "u1", "u2"},
-		{"empty values", "", ""},
-		{"empty user", "", "u2"},
-		{"empty target", "u1", ""},
-		{"self follow", "u1", "u1"},
-		{"whitespace preserved", " ", "  "},
+		{"all valid", "a@b.com", "alice", "hashed", "hello", "http://img/x.png"},
+		{"some empty", "", "bob", "", "", ""},
+		{"all empty", "", "", "", "", ""},
+		{"whitespace not trimmed", " a@b.com ", "  bob", "p ", " ", "\t"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewFollowRelation(tt.userID, tt.targetID)
-			if r.UserID != tt.userID {
-				t.Errorf("UserID = %q, want %q", r.UserID, tt.userID)
+			u, err := NewUser(tt.email, tt.username, tt.password, tt.bio, tt.image)
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-			if r.TargetID != tt.targetID {
-				t.Errorf("TargetID = %q, want %q", r.TargetID, tt.targetID)
+			if u == nil {
+				t.Fatal("nil user")
+			}
+			if !userUUIDv4Re.MatchString(u.ID) || len(u.ID) != 36 {
+				t.Errorf("ID %q not canonical uuid v4", u.ID)
+			}
+			if u.Email != tt.email || u.Username != tt.username || u.Password != tt.password ||
+				u.Bio != tt.bio || u.Image != tt.image {
+				t.Errorf("fields not stored as-is: %+v", *u)
 			}
 		})
 	}
 }
 
-func TestFollowRelationArgumentOrder(t *testing.T) {
-	r := NewFollowRelation("follower", "target")
-	if r.UserID != "follower" || r.TargetID != "target" {
-		t.Fatalf("argument order not preserved: %+v", r)
+func TestNewUserUniqueIDs(t *testing.T) {
+	seen := map[string]bool{}
+	var prev *User
+	for i := 0; i < 200; i++ {
+		u, err := NewUser("a@b.com", "alice", "p", "b", "i")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if seen[u.ID] {
+			t.Fatalf("duplicate id %s", u.ID)
+		}
+		seen[u.ID] = true
+		if prev != nil && prev.Equal(u) {
+			t.Fatal("users with identical args should not be equal")
+		}
+		prev = u
 	}
 }
 
-func TestFollowRelationSetters(t *testing.T) {
+func TestZeroValueUser(t *testing.T) {
+	var u User
+	if u.ID != "" || u.Email != "" || u.Username != "" || u.Password != "" || u.Bio != "" || u.Image != "" {
+		t.Errorf("zero value not empty: %+v", u)
+	}
+}
+
+func TestUserUpdate(t *testing.T) {
+	base := User{ID: "id-1", Email: "e", Username: "u", Password: "p", Bio: "b", Image: "i"}
 	tests := []struct {
-		name       string
-		mutate     func(*FollowRelation)
-		wantUser   string
-		wantTarget string
+		name                                  string
+		email, username, password, bio, image string
+		want                                  User
 	}{
-		{"set user", func(r *FollowRelation) { r.UserID = "a" }, "a", "t0"},
-		{"set target", func(r *FollowRelation) { r.TargetID = "b" }, "u0", "b"},
-		{"set both last wins", func(r *FollowRelation) {
-			r.UserID = "x"
-			r.UserID = "y"
-			r.TargetID = "z"
-		}, "y", "z"},
+		{"all non-empty", "e2", "u2", "p2", "b2", "i2", User{ID: "id-1", Email: "e2", Username: "u2", Password: "p2", Bio: "b2", Image: "i2"}},
+		{"all empty", "", "", "", "", "", base},
+		{"only email", "e2", "", "", "", "", User{ID: "id-1", Email: "e2", Username: "u", Password: "p", Bio: "b", Image: "i"}},
+		{"only image and bio", "", "", "", "b2", "i2", User{ID: "id-1", Email: "e", Username: "u", Password: "p", Bio: "b2", Image: "i2"}},
+		{"whitespace overwrites", " ", "", "", "\t", "", User{ID: "id-1", Email: " ", Username: "u", Password: "p", Bio: "\t", Image: "i"}},
+		{"same values", "e", "u", "p", "b", "i", base},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := NewFollowRelation("u0", "t0")
-			tt.mutate(&r)
-			if r.UserID != tt.wantUser || r.TargetID != tt.wantTarget {
-				t.Errorf("got %+v, want (%q,%q)", r, tt.wantUser, tt.wantTarget)
+			u := base
+			u.Update(tt.email, tt.username, tt.password, tt.bio, tt.image)
+			if u != tt.want {
+				t.Errorf("got %+v want %+v", u, tt.want)
 			}
 		})
 	}
 }
 
-func TestFollowRelationEqual(t *testing.T) {
+func TestUserUpdateKeepsIdentity(t *testing.T) {
+	u, err := NewUser("e", "u", "p", "b", "i")
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := *u
+	key := u.ID
+	u.Update("e2", "u2", "p2", "b2", "i2")
+	if u.ID != key || !u.Equal(&before) || !u.Equal(u) {
+		t.Error("identity changed after update")
+	}
+}
+
+func TestUserEqual(t *testing.T) {
+	var nilUser *User
 	tests := []struct {
 		name string
-		a, b FollowRelation
+		a, b *User
 		want bool
 	}{
-		{"same values", NewFollowRelation("a", "b"), NewFollowRelation("a", "b"), true},
-		{"different user", NewFollowRelation("a", "b"), NewFollowRelation("c", "b"), false},
-		{"different target", NewFollowRelation("a", "b"), NewFollowRelation("a", "c"), false},
-		{"swapped", NewFollowRelation("a", "b"), NewFollowRelation("b", "a"), false},
-		{"both empty", FollowRelation{}, FollowRelation{}, true},
-		{"empty vs set", FollowRelation{}, NewFollowRelation("a", "b"), false},
+		{"same id different fields", &User{ID: "x", Email: "a"}, &User{ID: "x", Email: "b"}, true},
+		{"different id same fields", &User{ID: "x", Email: "a"}, &User{ID: "y", Email: "a"}, false},
+		{"two zero values", &User{}, &User{}, true},
+		{"non-nil vs nil", &User{ID: "x"}, nil, false},
+		{"nil vs non-nil", nil, &User{ID: "x"}, false},
+		{"nil vs nil", nilUser, nil, true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := tt.a.Equal(tt.b); got != tt.want {
-				t.Errorf("a.Equal(b) = %v, want %v", got, tt.want)
+				t.Errorf("got %v want %v", got, tt.want)
 			}
-			if got := tt.b.Equal(tt.a); got != tt.want {
-				t.Errorf("symmetry: b.Equal(a) = %v, want %v", got, tt.want)
-			}
-			if got := tt.a == tt.b; got != tt.want {
-				t.Errorf("== = %v, want %v", got, tt.want)
-			}
-			if !tt.a.Equal(tt.a) {
-				t.Errorf("not reflexive")
+			if tt.want && tt.a != nil && tt.b != nil {
+				m := map[string]bool{tt.a.ID: true}
+				if !m[tt.b.ID] {
+					t.Error("equal users should share map key")
+				}
 			}
 		})
 	}
 }
 
-func TestFollowRelationEqualTransitive(t *testing.T) {
-	a := NewFollowRelation("x", "y")
-	b := NewFollowRelation("x", "y")
-	c := NewFollowRelation("x", "y")
-	if !(a.Equal(b) && b.Equal(c) && a.Equal(c)) {
-		t.Fatal("equality not transitive")
+func TestUserString(t *testing.T) {
+	var nilUser *User
+	if got := nilUser.String(); got != "User<nil>" {
+		t.Errorf("got %q", got)
 	}
-}
-
-func TestFollowRelationDifferentTypeAndNil(t *testing.T) {
-	var a interface{} = NewFollowRelation("a", "b")
-	others := []interface{}{nil, "a", ArticleFavorite{ArticleID: "a", UserID: "b"}, &FollowRelation{UserID: "a", TargetID: "b"}}
-	for _, o := range others {
-		if a == o {
-			t.Errorf("FollowRelation should not equal %#v", o)
+	u := &User{ID: "id", Email: "e@x", Username: "bob", Password: "supersecret", Bio: "b", Image: "i"}
+	s := u.String()
+	if strings.Contains(s, "supersecret") {
+		t.Errorf("password leaked: %s", s)
+	}
+	for _, want := range []string{"id", "e@x", "bob"} {
+		if !strings.Contains(s, want) {
+			t.Errorf("missing %q in %s", want, s)
 		}
 	}
 }
 
-func TestFollowRelationMapKey(t *testing.T) {
-	m := map[FollowRelation]int{}
-	m[NewFollowRelation("a", "b")] = 1
-	m[NewFollowRelation("a", "b")]++
-	m[NewFollowRelation("b", "a")] = 10
-	if len(m) != 2 {
-		t.Fatalf("len = %d, want 2", len(m))
-	}
-	if m[NewFollowRelation("a", "b")] != 2 {
-		t.Errorf("equal keys should hash identically")
-	}
-}
-
-func TestFollowRelationString(t *testing.T) {
-	tests := []struct {
-		name string
-		r    FollowRelation
-		want string
-	}{
-		{"set", NewFollowRelation("u1", "u2"), "FollowRelation(userId=u1, targetId=u2)"},
-		{"empty", FollowRelation{}, "FollowRelation(userId=, targetId=)"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			if got := tt.r.String(); got != tt.want {
-				t.Errorf("String() = %q, want %q", got, tt.want)
-			}
-		})
-	}
-	s := NewFollowRelation("u1", "u2").String()
-	if !strings.Contains(s, "u1") || !strings.Contains(s, "u2") {
-		t.Errorf("String() missing fields: %q", s)
-	}
-}
-
-func TestFollowRelationJSON(t *testing.T) {
-	r := NewFollowRelation("u1", "u2")
-	b, err := json.Marshal(r)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(b) != `{"userId":"u1","targetId":"u2"}` {
-		t.Errorf("json = %s", b)
-	}
-	var back FollowRelation
-	if err := json.Unmarshal(b, &back); err != nil {
-		t.Fatal(err)
-	}
-	if !back.Equal(r) {
-		t.Errorf("roundtrip mismatch: %+v", back)
+func TestNewUUIDv4(t *testing.T) {
+	for i := 0; i < 100; i++ {
+		id, err := newUUIDv4()
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !userUUIDv4Re.MatchString(id) {
+			t.Fatalf("bad uuid %q", id)
+		}
 	}
 }
