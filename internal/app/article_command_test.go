@@ -1,86 +1,203 @@
 package app
 
 import (
-	"encoding/json"
+	"context"
 	"errors"
+	"reflect"
+	"strings"
 	"testing"
 )
 
-func TestUpdateArticleParam_ZeroValue(t *testing.T) {
-	var p UpdateArticleParam
-	if p.Title() != "" || p.Body() != "" || p.Description() != "" {
-		t.Fatalf("zero value not empty: %+v", p)
-	}
+type fakeChecker struct {
+	existing map[string]bool
+	err      error
+	calls    []string
 }
 
-func TestNewUpdateArticleParam(t *testing.T) {
+func (f *fakeChecker) SlugExists(_ context.Context, slug string) (bool, error) {
+	f.calls = append(f.calls, slug)
+	if f.err != nil {
+		return false, f.err
+	}
+	return f.existing[slug], nil
+}
+
+func TestDecodeNewArticleParam(t *testing.T) {
 	tests := []struct {
-		name           string
-		title, body, d string
+		name    string
+		body    string
+		want    NewArticleParam
+		wantErr error
+		anyErr  bool
 	}{
-		{"all set", "t", "b", "d"},
-		{"all empty", "", "", ""},
-		{"no trimming", "  t ", "\nb", " d\t"},
-		{"partial", "t", "", "d"},
+		{
+			name: "full",
+			body: `{"article":{"title":"t","description":"d","body":"b","tagList":["x","y"]}}`,
+			want: NewArticleParam{Title: "t", Description: "d", Body: "b", TagList: []string{"x", "y"}},
+		},
+		{
+			name: "omits tagList",
+			body: `{"article":{"title":"t","description":"d","body":"b"}}`,
+			want: NewArticleParam{Title: "t", Description: "d", Body: "b"},
+		},
+		{
+			name: "omits required fields",
+			body: `{"article":{"tagList":[]}}`,
+			want: NewArticleParam{TagList: []string{}},
+		},
+		{
+			name: "unknown fields ignored",
+			body: `{"article":{"title":"t","extra":1},"other":2}`,
+			want: NewArticleParam{Title: "t"},
+		},
+		{name: "missing root", body: `{"title":"t"}`, wantErr: ErrMissingArticleRoot},
+		{name: "invalid json", body: `{`, anyErr: true},
+		{name: "wrong inner type", body: `{"article":{"title":5}}`, anyErr: true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			p := NewUpdateArticleParam(tc.title, tc.body, tc.d)
-			if p.Title() != tc.title {
-				t.Errorf("Title=%q want %q", p.Title(), tc.title)
+			got, err := DecodeNewArticleParam(strings.NewReader(tc.body))
+			if tc.wantErr != nil {
+				if !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+				return
 			}
-			if p.Body() != tc.body {
-				t.Errorf("Body=%q want %q", p.Body(), tc.body)
+			if tc.anyErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				return
 			}
-			if p.Description() != tc.d {
-				t.Errorf("Description=%q want %q", p.Description(), tc.d)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
 			}
-			if p.Title() != tc.title || p.Body() != tc.body || p.Description() != tc.d {
-				t.Errorf("getters mutated state")
+			if !reflect.DeepEqual(got, tc.want) {
+				t.Fatalf("got %+v, want %+v", got, tc.want)
+			}
+			if tc.name == "omits tagList" && got.TagList != nil {
+				t.Fatal("tagList should be nil")
 			}
 		})
 	}
 }
 
-func TestUpdateArticleParamCommand_DecodeJSON(t *testing.T) {
+func TestConstructorsAndBuilder(t *testing.T) {
+	if got := NewEmptyNewArticleParam(); !reflect.DeepEqual(got, NewArticleParam{}) || got.TagList != nil {
+		t.Fatalf("empty = %+v", got)
+	}
+	tags := []string{"a"}
+	want := NewArticleParam{Title: "t", Description: "d", Body: "b", TagList: []string{"a"}}
+	if got := NewNewArticleParam("t", "d", "b", tags); !reflect.DeepEqual(got, want) {
+		t.Fatalf("all-args = %+v", got)
+	}
+	// construction never validates
+	if got := NewNewArticleParam("", "", "", nil); !reflect.DeepEqual(got, NewArticleParam{}) {
+		t.Fatalf("blank all-args = %+v", got)
+	}
+	src := []string{"a"}
+	b := NewArticleParamBuilderFor().Title("t").Description("d").Body("b").TagList(src)
+	got := b.Build()
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("builder = %+v", got)
+	}
+	src[0] = "changed"
+	if got.TagList[0] != "a" {
+		t.Fatal("Build should copy tag slice")
+	}
+	if NewArticleParamBuilderFor().Build().TagList != nil {
+		t.Fatal("nil tagList should stay nil")
+	}
+}
+
+func TestValidateNewArticleParam(t *testing.T) {
+	valid := NewNewArticleParam("Hello World", "d", "b", nil)
 	tests := []struct {
-		name          string
-		in            string
-		wantT, wantB  string
-		wantD         string
-		wantErr       bool
-		wantErrIsRoot bool
+		name     string
+		p        NewArticleParam
+		existing map[string]bool
+		want     map[string][]string
 	}{
-		{name: "all fields", in: `{"article":{"title":"t","body":"b","description":"d"}}`, wantT: "t", wantB: "b", wantD: "d"},
-		{name: "only title", in: `{"article":{"title":"t"}}`, wantT: "t"},
-		{name: "empty article", in: `{"article":{}}`},
-		{name: "null field becomes empty", in: `{"article":{"title":null,"body":"b"}}`, wantB: "b"},
-		{name: "unknown fields ignored", in: `{"article":{"title":"t","x":1},"other":2}`, wantT: "t"},
-		{name: "missing root", in: `{"title":"t"}`, wantErr: true, wantErrIsRoot: true},
-		{name: "null root", in: `{"article": null }`, wantErr: true, wantErrIsRoot: true},
-		{name: "invalid json", in: `{`, wantErr: true},
-		{name: "non-object envelope", in: `[]`, wantErr: true},
-		{name: "article not object", in: `{"article":"x"}`, wantErr: true},
-		{name: "wrong field type", in: `{"article":{"title":5}}`, wantErr: true},
+		{name: "valid nil tags", p: valid},
+		{name: "valid empty tags", p: NewNewArticleParam("x", "d", "b", []string{})},
+		{name: "empty title", p: NewNewArticleParam("", "d", "b", nil), want: map[string][]string{"title": {MsgCantBeEmpty}}},
+		{name: "whitespace description", p: NewNewArticleParam("t", " \t\n", "b", nil), want: map[string][]string{"description": {MsgCantBeEmpty}}},
+		{name: "empty body", p: NewNewArticleParam("t", "d", "", nil), want: map[string][]string{"body": {MsgCantBeEmpty}}},
+		{name: "all blank", p: NewArticleParam{}, want: map[string][]string{
+			"title": {MsgCantBeEmpty}, "description": {MsgCantBeEmpty}, "body": {MsgCantBeEmpty}}},
+		{name: "duplicate", p: valid, existing: map[string]bool{"hello-world": true},
+			want: map[string][]string{"title": {MsgArticleNameExists}}},
+		{name: "blank and duplicate", p: NewNewArticleParam(" ", "d", "b", nil), existing: map[string]bool{"-": true},
+			want: map[string][]string{"title": {MsgCantBeEmpty, MsgArticleNameExists}}},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			var p UpdateArticleParam
-			err := json.Unmarshal([]byte(tc.in), &p)
-			if tc.wantErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				if tc.wantErrIsRoot && !errors.Is(err, ErrMissingArticleRoot) {
-					t.Fatalf("err=%v want ErrMissingArticleRoot", err)
+			c := &fakeChecker{existing: tc.existing}
+			err := ValidateNewArticleParam(context.Background(), tc.p, c)
+			if len(c.calls) != 1 || c.calls[0] != ArticleTitleToSlug(tc.p.Title) {
+				t.Fatalf("checker calls = %v", c.calls)
+			}
+			if tc.want == nil {
+				if err != nil {
+					t.Fatalf("unexpected err: %v", err)
 				}
 				return
 			}
-			if err != nil {
-				t.Fatalf("unexpected error: %v", err)
+			var verr *NewArticleValidationError
+			if !errors.As(err, &verr) {
+				t.Fatalf("err = %v, want validation error", err)
 			}
-			if p.Title() != tc.wantT || p.Body() != tc.wantB || p.Description() != tc.wantD {
-				t.Fatalf("got (%q,%q,%q) want (%q,%q,%q)", p.Title(), p.Body(), p.Description(), tc.wantT, tc.wantB, tc.wantD)
+			if !reflect.DeepEqual(verr.Fields, tc.want) {
+				t.Fatalf("fields = %v, want %v", verr.Fields, tc.want)
+			}
+			if _, ok := verr.Fields["tagList"]; ok {
+				t.Fatal("tagList must not be validated")
+			}
+		})
+	}
+}
+
+func TestValidateNewArticleParamErrors(t *testing.T) {
+	p := NewNewArticleParam("t", "d", "b", nil)
+	if err := ValidateNewArticleParam(context.Background(), p, nil); !errors.Is(err, ErrNilArticleSlugChecker) {
+		t.Fatalf("err = %v", err)
+	}
+	boom := errors.New("db down")
+	err := ValidateNewArticleParam(context.Background(), p, ArticleSlugCheckerFunc(func(context.Context, string) (bool, error) {
+		return false, boom
+	}))
+	if !errors.Is(err, boom) {
+		t.Fatalf("err = %v", err)
+	}
+	var verr *NewArticleValidationError
+	if errors.As(err, &verr) {
+		t.Fatal("checker error must not be validation error")
+	}
+}
+
+func TestValidationErrorMessage(t *testing.T) {
+	e := &NewArticleValidationError{Fields: map[string][]string{
+		"title": {"a", "b"}, "body": {"c"},
+	}}
+	want := "validation failed: body: c; title: a, b"
+	if got := e.Error(); got != want {
+		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestArticleTitleToSlug(t *testing.T) {
+	tests := []struct{ in, want string }{
+		{"Hello World", "hello-world"},
+		{"How to train, your dragon?", "how-to-train-your-dragon-"},
+		{"A & B | C", "a-b-c"},
+		{"it’s “ok”.", "it-s-“ok”-"},
+		{"plain", "plain"},
+		{"", ""},
+	}
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			if got := ArticleTitleToSlug(tc.in); got != tc.want {
+				t.Fatalf("got %q, want %q", got, tc.want)
 			}
 		})
 	}
