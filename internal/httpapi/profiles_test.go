@@ -13,14 +13,14 @@ import (
 	"migrated-app/internal/core"
 )
 
-type fakeQuerier struct {
+type fakeProfileQuerier struct {
 	profiles map[string]app.ProfileData
 	follows  map[[2]string]bool
 	err      error
 	viewers  []*core.User
 }
 
-func (f *fakeQuerier) FindByUsername(ctx context.Context, username string, current *core.User) (app.ProfileData, bool, error) {
+func (f *fakeProfileQuerier) FindByUsername(ctx context.Context, username string, current *core.User) (app.ProfileData, bool, error) {
 	f.viewers = append(f.viewers, current)
 	if f.err != nil {
 		return app.ProfileData{}, false, f.err
@@ -85,8 +85,8 @@ func TestNewProfilesHandler(t *testing.T) {
 		want error
 	}{
 		{"nil querier", nil, &fakeRepo{}, ErrNilProfileQuerier},
-		{"nil repo", &fakeQuerier{}, nil, ErrNilFollowRepository},
-		{"ok", &fakeQuerier{}, &fakeRepo{}, nil},
+		{"nil repo", &fakeProfileQuerier{}, nil, ErrNilFollowRepository},
+		{"ok", &fakeProfileQuerier{}, &fakeRepo{}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
