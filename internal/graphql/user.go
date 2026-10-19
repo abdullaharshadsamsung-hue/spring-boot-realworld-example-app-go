@@ -15,7 +15,7 @@ import (
 // Schema coordinates resolved by MeDatafetcher. They replace the DGS codegen
 // constants QUERY.Me, USERPAYLOAD.TYPE_NAME and USERPAYLOAD.User.
 const (
-	QueryType            = "Query"
+	// QueryType is declared in tags.go and shared across the package.
 	QueryFieldMe         = "me"
 	UserPayloadType      = "UserPayload"
 	UserPayloadFieldUser = "user"
