@@ -202,7 +202,8 @@ func (h *CommentsHandler) DeleteComment(w http.ResponseWriter, r *http.Request) 
 		return ErrResourceNotFound
 	}
 	if !canWriteComment(user, article, comment) {
-		return ErrNoAuthorization
+		WriteAuthzError(w, r, ErrNoAuthorization)
+		return nil
 	}
 	if err := h.comments.Remove(ctx, comment); err != nil {
 		return fmt.Errorf("delete comment: remove: %w", err)
