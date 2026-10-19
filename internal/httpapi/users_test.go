@@ -32,12 +32,12 @@ func (f *fakeRegistrar) CreateUser(ctx context.Context, email, username, passwor
 	return &core.User{ID: "u1", Email: email, Username: username, Password: "hashed", Image: defaultImg}, nil
 }
 
-type fakeFinder struct {
+type usersFakeFinder struct {
 	user *core.User
 	err  error
 }
 
-func (f *fakeFinder) FindByEmail(ctx context.Context, email string) (*core.User, error) {
+func (f *usersFakeFinder) FindByEmail(ctx context.Context, email string) (*core.User, error) {
 	if f.err != nil {
 		return nil, f.err
 	}
@@ -80,7 +80,7 @@ func (f *fakeTokens) ToToken(u *core.User) (string, error) {
 }
 
 func TestNewUsersHandler(t *testing.T) {
-	r, f, l, m, tk := &fakeRegistrar{}, &fakeFinder{}, &fakeLoader{}, fakeMatcher{}, &fakeTokens{}
+	r, f, l, m, tk := &fakeRegistrar{}, &usersFakeFinder{}, &fakeLoader{}, fakeMatcher{}, &fakeTokens{}
 	tests := []struct {
 		name string
 		fn   func() (*UsersHandler, error)
@@ -169,7 +169,7 @@ func TestCreateUser(t *testing.T) {
 				loader.data["u1"] = app.NewUserData("u1", "john@jacob.com", "johnjacob", "", defaultImg)
 			}
 			tk := &fakeTokens{err: tc.tokenErr}
-			h, err := NewUsersHandler(reg, &fakeFinder{}, loader, fakeMatcher{}, tk)
+			h, err := NewUsersHandler(reg, &usersFakeFinder{}, loader, fakeMatcher{}, tk)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -224,7 +224,7 @@ func TestLogin(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			loader := &fakeLoader{data: map[string]app.UserData{"u2": app.NewUserData("u2", "john@jacob.com", "johnjacob2", "", defaultImg)}}
 			tk := &fakeTokens{}
-			h, err := NewUsersHandler(&fakeRegistrar{}, &fakeFinder{user: stored, err: tc.finderErr}, loader, fakeMatcher{}, tk)
+			h, err := NewUsersHandler(&fakeRegistrar{}, &usersFakeFinder{user: stored, err: tc.finderErr}, loader, fakeMatcher{}, tk)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -255,7 +255,7 @@ func TestLogin(t *testing.T) {
 
 func TestLoginFailuresIndistinguishable(t *testing.T) {
 	stored := &core.User{ID: "u2", Email: "john@jacob.com", Password: "hash:123"}
-	h, _ := NewUsersHandler(&fakeRegistrar{}, &fakeFinder{user: stored}, &fakeLoader{}, fakeMatcher{}, &fakeTokens{})
+	h, _ := NewUsersHandler(&fakeRegistrar{}, &usersFakeFinder{user: stored}, &fakeLoader{}, fakeMatcher{}, &fakeTokens{})
 	r1, _ := serve(t, h, "/users/login", `{"user":{"email":"john@jacob.com","password":"bad"}}`)
 	r2, _ := serve(t, h, "/users/login", `{"user":{"email":"other@jacob.com","password":"bad"}}`)
 	if r1.Code != r2.Code || r1.Body.String() != r2.Body.String() {
