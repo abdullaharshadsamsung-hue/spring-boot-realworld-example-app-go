@@ -78,7 +78,7 @@ func Authenticate(tokens SubjectResolver, users UserByIDFinder) func(http.Handle
 
 			// The source only authenticates when no authentication is
 			// already present in the security context.
-			if _, already := auth.UserFromContext(r.Context()); already {
+			if _, already := auth.UserFrom(r.Context()); already {
 				next.ServeHTTP(w, r)
 				return
 			}
@@ -173,7 +173,7 @@ func antMatch(pattern, path string) bool {
 func Authorize(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if requiredAccess(r.Method, r.URL.Path) == accessAuthenticated {
-			if _, ok := auth.UserFromContext(r.Context()); !ok {
+			if _, ok := auth.UserFrom(r.Context()); !ok {
 				w.WriteHeader(http.StatusUnauthorized)
 				return
 			}
@@ -186,7 +186,7 @@ func Authorize(next http.Handler) http.Handler {
 // bare 401. It is useful for routes mounted outside the Authorize chain.
 func RequireAuth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if _, ok := auth.UserFromContext(r.Context()); !ok {
+		if _, ok := auth.UserFrom(r.Context()); !ok {
 			w.WriteHeader(http.StatusUnauthorized)
 			return
 		}
