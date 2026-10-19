@@ -1,7 +1,7 @@
 package httpapi
 
 import (
-	"errors"
+	"encoding/json"
 	"net/http"
 	"time"
 )
@@ -22,19 +22,9 @@ type ErrorBody struct {
 	Path      string `json:"path"`
 }
 
-// StatusFor maps err to the HTTP status code WriteError would use for it.
-// A nil error maps to 200 OK.
-func StatusFor(err error) int {
-	switch {
-	case err == nil:
-		return http.StatusOK
-	case errors.Is(err, ErrInvalidAuthentication):
-		return http.StatusUnprocessableEntity
-	case errors.Is(err, ErrNoAuthorization):
-		return http.StatusForbidden
-	case errors.Is(err, ErrResourceNotFound):
-		return http.StatusNotFound
-	default:
-		return http.StatusInternalServerError
-	}
+// writeErrorJSON encodes v as JSON with the given status code.
+func writeErrorJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
 }
