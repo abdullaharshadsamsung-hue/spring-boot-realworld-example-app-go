@@ -1,53 +1,61 @@
+// Package core contains the domain model and repository ports of the
+// RealWorld application.
 package core
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
-	mrand "math/rand/v2"
+	"fmt"
 	"regexp"
 	"strings"
 	"time"
 )
 
-// Tag is a label attached to an article. Two tags are the same when their
-// names match, regardless of their IDs, as with the source's Tag
-// (@EqualsAndHashCode(of = "name")).
+// ---------------------------------------------------------------------------
+// Tag
+// ---------------------------------------------------------------------------
+
+// Tag is a label attached to articles. Two tags are equal when their names
+// are equal. ID is only an identity for persistence.
 type Tag struct {
 	ID   string
 	Name string
 }
 
-// NewTag returns a Tag with the given name and a new random UUID ID.
-func NewTag(name string) Tag {
-	return Tag{ID: newRandomUUIDForCore(), Name: name}
+// NewTag creates a Tag with a freshly generated random UUID (v4) identifier.
+func NewTag(name string) (Tag, error) {
+	id, err := newArticleUUID()
+	if err != nil {
+		return Tag{}, fmt.Errorf("core: new tag %q: %w", name, err)
+	}
+	return Tag{ID: id, Name: name}, nil
 }
 
-// Equal reports whether t and other have the same name, matching the
-// source's name-based equality.
+// Equal reports whether t and other have the same name. This mirrors the
+// source's equality, which compared names only.
 func (t Tag) Equal(other Tag) bool {
 	return t.Name == other.Name
 }
 
-// Key returns the value that identifies a tag (its name). Use it as a map key
-// to deduplicate tags.
+// Key returns the value that identifies a tag for de-duplication (its name).
 func (t Tag) Key() string {
 	return t.Name
 }
 
-// String returns the tag name.
+// String returns the tag's name.
 func (t Tag) String() string {
 	return t.Name
 }
 
-// Article is the aggregate root for a blog article.
-//
-// Fields are exported so the persistence layer can hydrate the struct. The
-// source achieved the same with Lombok @Getter, @NoArgsConstructor and
-// reflection. Domain code should change an article only through Update, so
-// the slug and UpdatedAt stay consistent.
+// ---------------------------------------------------------------------------
+// Article
+// ---------------------------------------------------------------------------
+
+// Article is the article aggregate root.
 type Article struct {
-	UserID      string
 	ID          string
+	UserID      string
 	Slug        string
 	Title       string
 	Description string
@@ -57,34 +65,52 @@ type Article struct {
 	UpdatedAt   time.Time
 }
 
-// NewArticle creates an article with a new random UUID ID. The slug is
-// derived from title, and duplicate tag names are removed. A nil tagList
-// gives an empty tag list.
-//
-// createdAt sets both CreatedAt and UpdatedAt. If createdAt is the zero time,
-// the current time is used. This covers both source constructors: the 5-arg
-// one that defaulted to new DateTime() and the 6-arg one that took createdAt.
-func NewArticle(title, description, body string, tagList []string, userID string, createdAt time.Time) *Article {
+// NewArticle creates an article with a random UUID, a slug derived from the
+// title and de-duplicated tags. Both CreatedAt and UpdatedAt are set to
+// createdAt; pass the zero time to use the current time.
+func NewArticle(title, description, body string, tagList []string, userID string, createdAt time.Time) (*Article, error) {
 	if createdAt.IsZero() {
 		createdAt = time.Now()
 	}
+	id, err := newArticleUUID()
+	if err != nil {
+		return nil, fmt.Errorf("core: new article: %w", err)
+	}
+
+	seen := make(map[string]struct{}, len(tagList))
+	tags := make([]Tag, 0, len(tagList))
+	for _, name := range tagList {
+		if _, dup := seen[name]; dup {
+			continue
+		}
+		seen[name] = struct{}{}
+		tag, err := NewTag(name)
+		if err != nil {
+			return nil, fmt.Errorf("core: new article: %w", err)
+		}
+		tags = append(tags, tag)
+	}
+
 	return &Article{
+		ID:          id,
 		UserID:      userID,
-		ID:          newRandomUUIDForCore(),
 		Slug:        ToSlug(title),
 		Title:       title,
 		Description: description,
 		Body:        body,
-		Tags:        dedupeTags(tagList),
+		Tags:        tags,
 		CreatedAt:   createdAt,
 		UpdatedAt:   createdAt,
-	}
+	}, nil
 }
 
-// Update changes the title, description and body. Empty values are ignored.
-// Changing the title also recomputes the slug. Any applied change sets
-// UpdatedAt to the current time, in memory only.
+// Update changes the article's title, description and body. Empty values
+// leave the corresponding field unchanged. Changing the title regenerates
+// the slug. Every applied change refreshes UpdatedAt.
 func (a *Article) Update(title, description, body string) {
+	if a == nil {
+		return
+	}
 	if title != "" {
 		a.Title = title
 		a.Slug = ToSlug(title)
@@ -100,8 +126,7 @@ func (a *Article) Update(title, description, body string) {
 	}
 }
 
-// Equal reports whether a and other are the same article, compared by ID
-// only (source: @EqualsAndHashCode(of = {"id"})). Two nil articles are equal.
+// Equal reports whether a and other have the same ID.
 func (a *Article) Equal(other *Article) bool {
 	if a == nil || other == nil {
 		return a == other
@@ -109,70 +134,51 @@ func (a *Article) Equal(other *Article) bool {
 	return a.ID == other.ID
 }
 
-// slugSeparators matches runs of the characters the source's slug regex
-// replaced: '&', '|', U+FE30–U+FFA0, '’', '”', whitespace, '?', ',' and '.'.
-//
-// MIGRATION_NOTE: Java's \s matches [ \t\n\x0B\f\r], but Go's RE2 \s does not
-// include \x0B (vertical tab). \x0B is added explicitly to keep the behavior
-// the same.
-var slugSeparators = regexp.MustCompile(`[&|\x{FE30}-\x{FFA0}’”\s\x0B?,.]+`)
+// slugSeparators matches runs of the characters the source replaced with a
+// hyphen: & | U+FE30..U+FFA0 ' " whitespace ? , .
+var slugSeparators = regexp.MustCompile(`[&|\x{FE30}-\x{FFA0}'"\s?,.]+`)
 
-// ToSlug lowercases title and replaces each run of separator characters with
-// a single '-'.
-//
-// MIGRATION_NOTE: Java's String.toLowerCase() depends on the locale, while
-// strings.ToLower uses Unicode case mapping. Results can differ only for
-// locale-specific cases such as the Turkish dotted I.
+// ToSlug converts a title to its slug: the lower-cased title with each run
+// of separator characters replaced by a single "-".
 func ToSlug(title string) string {
 	return slugSeparators.ReplaceAllString(strings.ToLower(title), "-")
 }
 
-// dedupeTags turns tag names into Tags and removes duplicate names, keeping
-// the first occurrence of each.
-//
-// MIGRATION_NOTE: The source used a HashSet, so its tag order was
-// unspecified. Keeping input order is deterministic and still satisfies the
-// source's behavior.
-func dedupeTags(names []string) []Tag {
-	tags := make([]Tag, 0, len(names))
-	seen := make(map[string]struct{}, len(names))
-	for _, name := range names {
-		if _, ok := seen[name]; ok {
-			continue
-		}
-		seen[name] = struct{}{}
-		tags = append(tags, NewTag(name))
-	}
-	return tags
-}
-
-// newRandomUUIDForCore returns a random RFC 4122 version 4 UUID string, like
-// Java's UUID.randomUUID().toString().
-//
-// MIGRATION_NOTE: No UUID library is in go.mod, so the UUID is built from
-// crypto/rand. On the very rare chance that crypto/rand fails, math/rand/v2
-// is used instead. These are identifiers, not secrets, so this avoids a panic
-// and avoids changing the constructor signatures that callers already use.
-// Review this if IDs ever need to be unguessable.
-func newRandomUUIDForCore() string {
+// newArticleUUID returns a random RFC 4122 version 4 UUID string.
+func newArticleUUID() (string, error) {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		for i := range b {
-			b[i] = byte(mrand.Uint32())
-		}
+		return "", fmt.Errorf("generate uuid: %w", err)
 	}
-	b[6] = (b[6] & 0x0f) | 0x40 // version 4
-	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
+	b[6] = (b[6] & 0x0f) | 0x40
+	b[8] = (b[8] & 0x3f) | 0x80
+	h := hex.EncodeToString(b[:])
+	return h[0:8] + "-" + h[8:12] + "-" + h[12:16] + "-" + h[16:20] + "-" + h[20:32], nil
+}
 
-	var out [36]byte
-	hex.Encode(out[0:8], b[0:4])
-	out[8] = '-'
-	hex.Encode(out[9:13], b[4:6])
-	out[13] = '-'
-	hex.Encode(out[14:18], b[6:8])
-	out[18] = '-'
-	hex.Encode(out[19:23], b[8:10])
-	out[23] = '-'
-	hex.Encode(out[24:36], b[10:16])
-	return string(out[:])
+// ---------------------------------------------------------------------------
+// ArticleRepository
+// ---------------------------------------------------------------------------
+
+// ArticleRepository is the persistence port for Article aggregates. The
+// PostgreSQL implementation lives in the store layer and is injected through
+// constructors.
+//
+// MIGRATION_NOTE: Java's Optional<Article> becomes (*Article, error). A
+// missing article is reported as the sentinel ErrNotFound (internal/core/errors.go);
+// callers should check it with errors.Is.
+type ArticleRepository interface {
+	// Save persists a. If no article with a.ID exists, it is inserted;
+	// otherwise the existing row is updated. Its tags are created if they
+	// do not exist yet and linked to the article.
+	Save(ctx context.Context, a *Article) error
+
+	// FindByID returns the article with the given id, or ErrNotFound.
+	FindByID(ctx context.Context, id string) (*Article, error)
+
+	// FindBySlug returns the article with the given slug, or ErrNotFound.
+	FindBySlug(ctx context.Context, slug string) (*Article, error)
+
+	// Remove deletes a from persistence.
+	Remove(ctx context.Context, a *Article) error
 }
