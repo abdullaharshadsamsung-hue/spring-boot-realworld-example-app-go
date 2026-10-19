@@ -73,6 +73,8 @@ func (e *fakeEncoder) Encode(raw string) (string, error) {
 	return "hashed:" + raw, nil
 }
 
+func paramPtr(p UpdateUserParam) *UpdateUserParam { return &p }
+
 func collectFieldErrors(err error) []FieldError {
 	var out []FieldError
 	var walk func(error)
@@ -257,12 +259,12 @@ func TestUpdateUser(t *testing.T) {
 	}{
 		{
 			name:  "unused email and username",
-			param: NewUpdateUserParam("new@b.com", "newpw", "newname", "bio", "img"),
+			param: paramPtr(NewUpdateUserParam("new@b.com", "newpw", "newname", "bio", "img")),
 			want:  want{ok: true},
 		},
 		{
 			name:  "owned by target",
-			param: NewUpdateUserParam("t@b.com", "", "target", "bio", ""),
+			param: paramPtr(NewUpdateUserParam("t@b.com", "", "target", "bio", "")),
 			setup: func(r *fakeUserRepo, tg *core.User) {
 				r.byEmail[tg.Email] = &core.User{ID: tg.ID, Email: tg.Email}
 				r.byUsername[tg.Username] = &core.User{ID: tg.ID, Username: tg.Username}
@@ -271,19 +273,19 @@ func TestUpdateUser(t *testing.T) {
 		},
 		{
 			name:  "email conflict",
-			param: NewUpdateUserParam("x@b.com", "", "newname", "", ""),
+			param: paramPtr(NewUpdateUserParam("x@b.com", "", "newname", "", "")),
 			setup: func(r *fakeUserRepo, tg *core.User) { r.byEmail["x@b.com"] = &core.User{ID: "x"} },
 			want:  want{fields: [][2]string{{"email", "email already exist"}}},
 		},
 		{
 			name:  "username conflict",
-			param: NewUpdateUserParam("new@b.com", "", "x", "", ""),
+			param: paramPtr(NewUpdateUserParam("new@b.com", "", "x", "", "")),
 			setup: func(r *fakeUserRepo, tg *core.User) { r.byUsername["x"] = &core.User{ID: "x"} },
 			want:  want{fields: [][2]string{{"username", "username already exist"}}},
 		},
 		{
 			name:  "both conflict",
-			param: NewUpdateUserParam("x@b.com", "", "y", "", ""),
+			param: paramPtr(NewUpdateUserParam("x@b.com", "", "y", "", "")),
 			setup: func(r *fakeUserRepo, tg *core.User) {
 				r.byEmail["x@b.com"] = &core.User{ID: "x"}
 				r.byUsername["y"] = &core.User{ID: "y"}
@@ -292,7 +294,7 @@ func TestUpdateUser(t *testing.T) {
 		},
 		{
 			name:  "invalid email format",
-			param: NewUpdateUserParam("bad", "", "", "", ""),
+			param: paramPtr(NewUpdateUserParam("bad", "", "", "", "")),
 			want:  want{fields: [][2]string{{"email", "should be an email"}}},
 		},
 	}
@@ -361,7 +363,7 @@ func TestUpdateUser(t *testing.T) {
 
 func TestUpdateUserNilCommand(t *testing.T) {
 	u := &core.User{ID: "1"}
-	p := NewUpdateUserParam("", "", "", "", "")
+	p := paramPtr(NewUpdateUserParam("", "", "", "", ""))
 	tests := []struct {
 		name string
 		cmd  *UpdateUserCommand
@@ -400,7 +402,7 @@ func TestUpdateUserDependencyErrors(t *testing.T) {
 			enc := &fakeEncoder{}
 			tt.setup(repo, enc)
 			s := newSvc(t, repo, enc)
-			cmd := NewUpdateUserCommand(&core.User{ID: "1"}, NewUpdateUserParam("a@b.com", "pw", "n", "", ""))
+			cmd := NewUpdateUserCommand(&core.User{ID: "1"}, paramPtr(NewUpdateUserParam("a@b.com", "pw", "n", "", "")))
 			if err := s.UpdateUser(context.Background(), cmd); !errors.Is(err, boom) {
 				t.Errorf("err = %v", err)
 			}
@@ -412,7 +414,7 @@ func TestValidateUpdateUserAlwaysQueriesBoth(t *testing.T) {
 	repo := newFakeRepo()
 	repo.byEmail["x@b.com"] = &core.User{ID: "x"}
 	s := newSvc(t, repo, &fakeEncoder{})
-	cmd := NewUpdateUserCommand(&core.User{ID: "1"}, NewUpdateUserParam("x@b.com", "", "name", "", ""))
+	cmd := NewUpdateUserCommand(&core.User{ID: "1"}, paramPtr(NewUpdateUserParam("x@b.com", "", "name", "", "")))
 	err := s.ValidateUpdateUser(context.Background(), cmd)
 	if !hasFieldError(collectFieldErrors(err), "email", "email already exist") {
 		t.Errorf("err = %v", err)
@@ -456,8 +458,8 @@ func TestUpdateUserParamJSON(t *testing.T) {
 		missing bool
 		want    *UpdateUserParam
 	}{
-		{"full", `{"user":{"email":"a@b.com","password":"p","username":"u","bio":"b","image":"i"}}`, false, false, NewUpdateUserParam("a@b.com", "p", "u", "b", "i")},
-		{"null body", `{"user":null}`, false, false, NewUpdateUserParam("", "", "", "", "")},
+		{"full", `{"user":{"email":"a@b.com","password":"p","username":"u","bio":"b","image":"i"}}`, false, false, paramPtr(NewUpdateUserParam("a@b.com", "p", "u", "b", "i"))},
+		{"null body", `{"user":null}`, false, false, paramPtr(NewUpdateUserParam("", "", "", "", ""))},
 		{"missing root", `{"email":"a@b.com"}`, true, true, nil},
 		{"invalid json", `{`, true, false, nil},
 	}
@@ -495,7 +497,7 @@ func TestUpdateUserParamJSON(t *testing.T) {
 func TestUpdateUserParamBuilder(t *testing.T) {
 	b := NewUpdateUserParamBuilder().Email("e@x.com").Password("p").Username("u").Bio("b").Image("i")
 	p := b.Build()
-	if *p != *NewUpdateUserParam("e@x.com", "p", "u", "b", "i") {
+	if *p != NewUpdateUserParam("e@x.com", "p", "u", "b", "i") {
 		t.Errorf("got %+v", *p)
 	}
 	b.Email("other@x.com")
