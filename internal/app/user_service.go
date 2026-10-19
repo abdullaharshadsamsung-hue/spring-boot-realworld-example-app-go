@@ -58,53 +58,8 @@ func (e *FieldError) Error() string {
 	return e.Field + " " + e.Message
 }
 
-// userParamError is a constant-capable error type.
-type userParamError string
-
-// Error implements the error interface.
-func (e userParamError) Error() string { return string(e) }
-
-// ErrMissingUserRoot is returned by UpdateUserParam.UnmarshalJSON when the
-// payload is not wrapped in the {"user": {...}} root object. It replaces
-// Jackson's @JsonRootName("user").
-const ErrMissingUserRoot = userParamError(`app: missing "user" root object`)
-
-// UpdateUserParam carries the optional new values of a user update.
-// Empty strings mean "leave unchanged".
-type UpdateUserParam struct {
-	email    string
-	password string
-	username string
-	bio      string
-	image    string
-}
-
-// NewUpdateUserParam builds an UpdateUserParam in the field order of the
-// original all-args constructor.
-func NewUpdateUserParam(email, password, username, bio, image string) *UpdateUserParam {
-	return &UpdateUserParam{
-		email:    email,
-		password: password,
-		username: username,
-		bio:      bio,
-		image:    image,
-	}
-}
-
-// Email returns the requested email, or "" if it is unchanged.
-func (p UpdateUserParam) Email() string { return p.email }
-
-// Password returns the requested raw password, or "" if it is unchanged.
-func (p UpdateUserParam) Password() string { return p.password }
-
-// Username returns the requested username, or "" if it is unchanged.
-func (p UpdateUserParam) Username() string { return p.username }
-
-// Bio returns the requested bio, or "" if it is unchanged.
-func (p UpdateUserParam) Bio() string { return p.bio }
-
-// Image returns the requested image URL, or "" if it is unchanged.
-func (p UpdateUserParam) Image() string { return p.image }
+// UpdateUserParam, its constructor, accessors and JSON (un)marshalling live
+// in update_user_param.go.
 
 // Validate applies the field-level constraints of UpdateUserParam. Only the
 // email format is checked (@Email(message = "should be an email")).
@@ -113,53 +68,6 @@ func (p UpdateUserParam) Validate() error {
 		return &FieldError{Field: userServiceFieldEmail, Message: msgShouldBeAnEmail}
 	}
 	return nil
-}
-
-type updateUserParamJSON struct {
-	Email    string `json:"email"`
-	Password string `json:"password"`
-	Username string `json:"username"`
-	Bio      string `json:"bio"`
-	Image    string `json:"image"`
-}
-
-// UnmarshalJSON decodes {"user": {...}} into the param.
-func (p *UpdateUserParam) UnmarshalJSON(data []byte) error {
-	var root map[string]json.RawMessage
-	if err := json.Unmarshal(data, &root); err != nil {
-		return fmt.Errorf("app: decode update user param: %w", err)
-	}
-	raw, ok := root[userParamJSONRoot]
-	if !ok {
-		return ErrMissingUserRoot
-	}
-	var body updateUserParamJSON
-	if string(raw) != "null" {
-		if err := json.Unmarshal(raw, &body); err != nil {
-			return fmt.Errorf("app: decode update user param body: %w", err)
-		}
-	}
-	*p = UpdateUserParam{
-		email:    body.Email,
-		password: body.Password,
-		username: body.Username,
-		bio:      body.Bio,
-		image:    body.Image,
-	}
-	return nil
-}
-
-// MarshalJSON encodes the param as {"user": {...}}.
-func (p UpdateUserParam) MarshalJSON() ([]byte, error) {
-	return json.Marshal(map[string]updateUserParamJSON{
-		userParamJSONRoot: {
-			Email:    p.email,
-			Password: p.password,
-			Username: p.username,
-			Bio:      p.bio,
-			Image:    p.image,
-		},
-	})
 }
 
 // UpdateUserParamBuilder builds an UpdateUserParam fluently. It replaces
