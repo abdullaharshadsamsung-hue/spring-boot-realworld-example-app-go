@@ -1,121 +1,73 @@
 package app
 
 import (
-	"encoding/json"
-	"errors"
+	"reflect"
 	"testing"
+
+	"migrated-app/internal/core"
 )
 
-type userFields struct {
-	email, password, username, bio, image string
-}
-
-func fieldsOf(p UpdateUserParam) userFields {
-	return userFields{p.Email(), p.Password(), p.Username(), p.Bio(), p.Image()}
-}
-
-func TestUpdateUserParam_UnmarshalJSON(t *testing.T) {
-	tests := []struct {
-		name    string
-		body    string
-		want    userFields
-		wantErr error
-		anyErr  bool
-	}{
-		{
-			name: "all fields",
-			body: `{"user":{"email":"a@b.com","username":"u","password":"p","bio":"b","image":"i"}}`,
-			want: userFields{"a@b.com", "p", "u", "b", "i"},
-		},
-		{
-			name: "partial fields",
-			body: `{"user":{"bio":"x"}}`,
-			want: userFields{bio: "x"},
-		},
-		{
-			name: "empty user object",
-			body: `{"user":{}}`,
-			want: userFields{},
-		},
-		{
-			name: "explicit null field becomes empty",
-			body: `{"user":{"email":null,"bio":"x"}}`,
-			want: userFields{bio: "x"},
-		},
-		{
-			name: "unknown properties ignored",
-			body: `{"user":{"username":"u","foo":"bar","nested":{"a":1}},"other":1}`,
-			want: userFields{username: "u"},
-		},
-		{
-			name:    "missing root",
-			body:    `{"email":"a@b.com"}`,
-			wantErr: ErrMissingUserRoot,
-		},
-		{
-			name:    "null root",
-			body:    `{"user": null }`,
-			wantErr: ErrMissingUserRoot,
-		},
-		{
-			name:   "invalid json",
-			body:   `{"user":`,
-			anyErr: true,
-		},
-		{
-			name:   "wrong field type",
-			body:   `{"user":{"email":123}}`,
-			anyErr: true,
-		},
-		{
-			name:   "user not object",
-			body:   `{"user":"str"}`,
-			anyErr: true,
-		},
+func TestNewUpdateUserCommand(t *testing.T) {
+	user := &core.User{
+		ID:       "id-1",
+		Email:    "a@example.com",
+		Username: "alice",
+		Password: "secret",
+		Bio:      "bio",
+		Image:    "img",
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var p UpdateUserParam
-			err := json.Unmarshal([]byte(tt.body), &p)
-			if tt.wantErr != nil {
-				if !errors.Is(err, tt.wantErr) {
-					t.Fatalf("err = %v, want %v", err, tt.wantErr)
-				}
-				return
-			}
-			if tt.anyErr {
-				if err == nil {
-					t.Fatal("expected error")
-				}
-				return
-			}
-			if err != nil {
-				t.Fatalf("unexpected err: %v", err)
-			}
-			if got := fieldsOf(p); got != tt.want {
-				t.Errorf("got %+v, want %+v", got, tt.want)
-			}
-		})
-	}
-}
+	emptyUser := &core.User{}
 
-func TestUpdateUserParamBuilder(t *testing.T) {
 	tests := []struct {
 		name  string
-		build func() UpdateUserParam
-		want  userFields
+		user  *core.User
+		param UpdateUserParam
 	}{
-		{"no setters", func() UpdateUserParam { return NewUpdateUserParamBuilder().Build() }, userFields{}},
-		{"email only", func() UpdateUserParam { return NewUpdateUserParamBuilder().Email("a@b.com").Build() }, userFields{email: "a@b.com"}},
-		{"all", func() UpdateUserParam {
-			return NewUpdateUserParamBuilder().Email("e").Password("p").Username("u").Bio("b").Image("i").Build()
-		}, userFields{"e", "p", "u", "b", "i"}},
+		{name: "non-nil user and zero param", user: user, param: UpdateUserParam{}},
+		{name: "zero-value user", user: emptyUser, param: UpdateUserParam{}},
+		{name: "nil user", user: nil, param: UpdateUserParam{}},
 	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if got := fieldsOf(tt.build()); got != tt.want {
-				t.Errorf("got %+v want %+v", got, tt.want)
+			var snapshot core.User
+			if tt.user != nil {
+				snapshot = *tt.user
+			}
+
+			cmd := NewUpdateUserCommand(tt.user, tt.param)
+
+			if got := cmd.TargetUser(); got != tt.user {
+				t.Fatalf("TargetUser() = %p, want same pointer %p", got, tt.user)
+			}
+			if got := cmd.Param(); !reflect.DeepEqual(got, tt.param) {
+				t.Fatalf("Param() = %#v, want %#v", got, tt.param)
+			}
+
+			// Repeated calls return the same values.
+			for i := 0; i < 3; i++ {
+				if cmd.TargetUser() != tt.user {
+					t.Fatalf("TargetUser() changed on call %d", i)
+				}
+				if !reflect.DeepEqual(cmd.Param(), tt.param) {
+					t.Fatalf("Param() changed on call %d", i)
+				}
+			}
+
+			// Constructor and getters must not modify the user.
+			if tt.user != nil && *tt.user != snapshot {
+				t.Fatalf("user mutated: got %+v, want %+v", *tt.user, snapshot)
 			}
 		})
+	}
+}
+
+func TestUpdateUserCommand_ZeroValue(t *testing.T) {
+	var cmd UpdateUserCommand
+	if cmd.TargetUser() != nil {
+		t.Fatalf("zero command TargetUser() = %v, want nil", cmd.TargetUser())
+	}
+	if !reflect.DeepEqual(cmd.Param(), UpdateUserParam{}) {
+		t.Fatalf("zero command Param() = %#v, want zero", cmd.Param())
 	}
 }
