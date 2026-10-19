@@ -2,203 +2,288 @@ package app
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
-	"reflect"
-	"strings"
 	"testing"
+	"time"
+
+	"migrated-app/internal/core"
 )
 
-type fakeChecker struct {
-	existing map[string]bool
-	err      error
-	calls    []string
+type fakeArticleWriter struct {
+	saved []*core.Article
+	err   error
 }
 
-func (f *fakeChecker) SlugExists(_ context.Context, slug string) (bool, error) {
-	f.calls = append(f.calls, slug)
-	if f.err != nil {
-		return false, f.err
-	}
-	return f.existing[slug], nil
+func (f *fakeArticleWriter) Save(_ context.Context, a *core.Article) error {
+	f.saved = append(f.saved, a)
+	return f.err
 }
 
-func TestDecodeNewArticleParam(t *testing.T) {
+type fakeValidator struct {
+	err    error
+	calls  int
+	params []NewArticleParam
+}
+
+func (f *fakeValidator) Validate(_ context.Context, p NewArticleParam) error {
+	f.calls++
+	f.params = append(f.params, p)
+	return f.err
+}
+
+func TestCreateArticle(t *testing.T) {
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 0, time.UTC)
+	validationErr := errors.New("can't be empty")
+	repoErr := errors.New("db down")
+	creator := &core.User{ID: "user-1", Username: "jake"}
+
 	tests := []struct {
-		name    string
-		body    string
-		want    NewArticleParam
-		wantErr error
-		anyErr  bool
+		name         string
+		param        NewArticleParam
+		creator      *core.User
+		validatorErr error
+		repoErr      error
+		wantErr      error
+		wantAnyErr   bool
+		wantSaves    int
+		wantTags     []string
 	}{
 		{
-			name: "full",
-			body: `{"article":{"title":"t","description":"d","body":"b","tagList":["x","y"]}}`,
-			want: NewArticleParam{Title: "t", Description: "d", Body: "b", TagList: []string{"x", "y"}},
+			name:      "valid param",
+			param:     NewArticleParam{Title: "How To Train", Description: "desc", Body: "body", TagList: []string{"java", "go", "java"}},
+			creator:   creator,
+			wantSaves: 1,
+			wantTags:  []string{"java", "go"},
 		},
 		{
-			name: "omits tagList",
-			body: `{"article":{"title":"t","description":"d","body":"b"}}`,
-			want: NewArticleParam{Title: "t", Description: "d", Body: "b"},
+			name:      "empty tag list",
+			param:     NewArticleParam{Title: "Title", Description: "d", Body: "b", TagList: []string{}},
+			creator:   creator,
+			wantSaves: 1,
+			wantTags:  []string{},
 		},
 		{
-			name: "omits required fields",
-			body: `{"article":{"tagList":[]}}`,
-			want: NewArticleParam{TagList: []string{}},
+			name:         "validation failure",
+			param:        NewArticleParam{Title: "", Description: "d", Body: "b"},
+			creator:      creator,
+			validatorErr: validationErr,
+			wantErr:      validationErr,
+			wantSaves:    0,
 		},
 		{
-			name: "unknown fields ignored",
-			body: `{"article":{"title":"t","extra":1},"other":2}`,
-			want: NewArticleParam{Title: "t"},
+			name:      "repository error propagates",
+			param:     NewArticleParam{Title: "T", Description: "d", Body: "b"},
+			creator:   creator,
+			repoErr:   repoErr,
+			wantErr:   repoErr,
+			wantSaves: 1,
 		},
-		{name: "missing root", body: `{"title":"t"}`, wantErr: ErrMissingArticleRoot},
-		{name: "invalid json", body: `{`, anyErr: true},
-		{name: "wrong inner type", body: `{"article":{"title":5}}`, anyErr: true},
+		{
+			name:       "nil creator",
+			param:      NewArticleParam{Title: "T", Description: "d", Body: "b"},
+			creator:    nil,
+			wantAnyErr: true,
+			wantSaves:  0,
+		},
 	}
+
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := DecodeNewArticleParam(strings.NewReader(tc.body))
-			if tc.wantErr != nil {
-				if !errors.Is(err, tc.wantErr) {
+			repo := &fakeArticleWriter{err: tc.repoErr}
+			val := &fakeValidator{err: tc.validatorErr}
+			svc := NewArticleCommandService(repo, val)
+			svc.now = func() time.Time { return fixed }
+
+			got, err := svc.CreateArticle(context.Background(), tc.param, tc.creator)
+
+			if len(repo.saved) != tc.wantSaves {
+				t.Fatalf("saves = %d, want %d", len(repo.saved), tc.wantSaves)
+			}
+			if tc.wantErr != nil || tc.wantAnyErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
 					t.Fatalf("err = %v, want %v", err, tc.wantErr)
+				}
+				if got != nil {
+					t.Fatalf("expected nil article")
 				}
 				return
 			}
-			if tc.anyErr {
-				if err == nil {
-					t.Fatal("expected error")
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if val.calls != 1 {
+				t.Fatalf("validator calls = %d", val.calls)
+			}
+			if repo.saved[0] != got {
+				t.Fatalf("saved instance differs from returned")
+			}
+			if got.Title != tc.param.Title || got.Description != tc.param.Description || got.Body != tc.param.Body {
+				t.Fatalf("fields mismatch: %+v", got)
+			}
+			if got.UserID != tc.creator.ID {
+				t.Fatalf("UserID = %q", got.UserID)
+			}
+			if got.ID == "" {
+				t.Fatalf("missing ID")
+			}
+			if got.Slug != core.ToSlug(tc.param.Title) {
+				t.Fatalf("slug = %q", got.Slug)
+			}
+			if !got.CreatedAt.Equal(fixed) {
+				t.Fatalf("CreatedAt = %v", got.CreatedAt)
+			}
+			if len(got.Tags) != len(tc.wantTags) {
+				t.Fatalf("tags = %v, want %v", got.Tags, tc.wantTags)
+			}
+			for i, n := range tc.wantTags {
+				if got.Tags[i].Name != n {
+					t.Fatalf("tag[%d] = %q, want %q", i, got.Tags[i].Name, n)
+				}
+			}
+		})
+	}
+}
+
+func TestUpdateArticle(t *testing.T) {
+	repoErr := errors.New("db down")
+	old := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	base := func() *core.Article {
+		return &core.Article{
+			ID: "a1", UserID: "u1", Slug: "old-title", Title: "Old Title",
+			Description: "old desc", Body: "old body",
+			Tags:      []core.Tag{{ID: "t1", Name: "go"}},
+			CreatedAt: old, UpdatedAt: old,
+		}
+	}
+
+	tests := []struct {
+		name        string
+		article     *core.Article
+		param       UpdateArticleParam
+		repoErr     error
+		wantErr     bool
+		wantSaves   int
+		wantTitle   string
+		wantSlug    string
+		wantDesc    string
+		wantBody    string
+		wantUpdated bool
+	}{
+		{
+			name: "all fields", article: base(),
+			param:     NewUpdateArticleParam("New Title", "new body", "new desc"),
+			wantSaves: 1, wantTitle: "New Title", wantSlug: "new-title",
+			wantDesc: "new desc", wantBody: "new body", wantUpdated: true,
+		},
+		{
+			name: "only body", article: base(),
+			param:     NewUpdateArticleParam("", "new body", ""),
+			wantSaves: 1, wantTitle: "Old Title", wantSlug: "old-title",
+			wantDesc: "old desc", wantBody: "new body", wantUpdated: true,
+		},
+		{
+			name: "all empty", article: base(),
+			param:     NewUpdateArticleParam("", "", ""),
+			wantSaves: 1, wantTitle: "Old Title", wantSlug: "old-title",
+			wantDesc: "old desc", wantBody: "old body",
+		},
+		{
+			name: "repo error", article: base(),
+			param:   NewUpdateArticleParam("X", "", ""),
+			repoErr: repoErr, wantErr: true, wantSaves: 1,
+		},
+		{
+			name: "nil article", article: nil,
+			param: NewUpdateArticleParam("X", "", ""), wantErr: true,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			repo := &fakeArticleWriter{err: tc.repoErr}
+			svc := NewArticleCommandService(repo, &fakeValidator{})
+			got, err := svc.UpdateArticle(context.Background(), tc.article, tc.param)
+			if len(repo.saved) != tc.wantSaves {
+				t.Fatalf("saves = %d, want %d", len(repo.saved), tc.wantSaves)
+			}
+			if tc.wantErr {
+				if err == nil || got != nil {
+					t.Fatalf("expected error, got %v %v", got, err)
+				}
+				if tc.repoErr != nil && !errors.Is(err, tc.repoErr) {
+					t.Fatalf("err = %v", err)
 				}
 				return
 			}
 			if err != nil {
 				t.Fatalf("unexpected err: %v", err)
 			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Fatalf("got %+v, want %+v", got, tc.want)
+			if got != tc.article || repo.saved[0] != tc.article {
+				t.Fatalf("expected same instance")
 			}
-			if tc.name == "omits tagList" && got.TagList != nil {
-				t.Fatal("tagList should be nil")
+			if got.Title != tc.wantTitle || got.Slug != tc.wantSlug || got.Description != tc.wantDesc || got.Body != tc.wantBody {
+				t.Fatalf("unexpected article: %+v", got)
+			}
+			if tc.wantUpdated == got.UpdatedAt.Equal(old) {
+				t.Fatalf("UpdatedAt refresh mismatch: %v", got.UpdatedAt)
+			}
+			if got.UserID != "u1" || len(got.Tags) != 1 || got.Tags[0].Name != "go" {
+				t.Fatalf("tags/author changed: %+v", got)
 			}
 		})
 	}
 }
 
-func TestConstructorsAndBuilder(t *testing.T) {
-	if got := NewEmptyNewArticleParam(); !reflect.DeepEqual(got, NewArticleParam{}) || got.TagList != nil {
-		t.Fatalf("empty = %+v", got)
-	}
-	tags := []string{"a"}
-	want := NewArticleParam{Title: "t", Description: "d", Body: "b", TagList: []string{"a"}}
-	if got := NewNewArticleParam("t", "d", "b", tags); !reflect.DeepEqual(got, want) {
-		t.Fatalf("all-args = %+v", got)
-	}
-	// construction never validates
-	if got := NewNewArticleParam("", "", "", nil); !reflect.DeepEqual(got, NewArticleParam{}) {
-		t.Fatalf("blank all-args = %+v", got)
-	}
-	src := []string{"a"}
-	b := NewArticleParamBuilderFor().Title("t").Description("d").Body("b").TagList(src)
-	got := b.Build()
-	if !reflect.DeepEqual(got, want) {
-		t.Fatalf("builder = %+v", got)
-	}
-	src[0] = "changed"
-	if got.TagList[0] != "a" {
-		t.Fatal("Build should copy tag slice")
-	}
-	if NewArticleParamBuilderFor().Build().TagList != nil {
-		t.Fatal("nil tagList should stay nil")
-	}
-}
-
-func TestValidateNewArticleParam(t *testing.T) {
-	valid := NewNewArticleParam("Hello World", "d", "b", nil)
+func TestUpdateArticleParamJSON(t *testing.T) {
 	tests := []struct {
-		name     string
-		p        NewArticleParam
-		existing map[string]bool
-		want     map[string][]string
+		name    string
+		input   string
+		want    UpdateArticleParam
+		wantErr error
+		anyErr  bool
 	}{
-		{name: "valid nil tags", p: valid},
-		{name: "valid empty tags", p: NewNewArticleParam("x", "d", "b", []string{})},
-		{name: "empty title", p: NewNewArticleParam("", "d", "b", nil), want: map[string][]string{"title": {MsgCantBeEmpty}}},
-		{name: "whitespace description", p: NewNewArticleParam("t", " \t\n", "b", nil), want: map[string][]string{"description": {MsgCantBeEmpty}}},
-		{name: "empty body", p: NewNewArticleParam("t", "d", "", nil), want: map[string][]string{"body": {MsgCantBeEmpty}}},
-		{name: "all blank", p: NewArticleParam{}, want: map[string][]string{
-			"title": {MsgCantBeEmpty}, "description": {MsgCantBeEmpty}, "body": {MsgCantBeEmpty}}},
-		{name: "duplicate", p: valid, existing: map[string]bool{"hello-world": true},
-			want: map[string][]string{"title": {MsgArticleNameExists}}},
-		{name: "blank and duplicate", p: NewNewArticleParam(" ", "d", "b", nil), existing: map[string]bool{"-": true},
-			want: map[string][]string{"title": {MsgCantBeEmpty, MsgArticleNameExists}}},
+		{"full", `{"article":{"title":"t","body":"b","description":"d"}}`, NewUpdateArticleParam("t", "b", "d"), nil, false},
+		{"partial", `{"article":{"body":"b"}}`, NewUpdateArticleParam("", "b", ""), nil, false},
+		{"missing root", `{"title":"t"}`, UpdateArticleParam{}, ErrMissingArticleRoot, true},
+		{"null root", `{"article":null}`, UpdateArticleParam{}, ErrMissingArticleRoot, true},
+		{"invalid json", `{`, UpdateArticleParam{}, nil, true},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			c := &fakeChecker{existing: tc.existing}
-			err := ValidateNewArticleParam(context.Background(), tc.p, c)
-			if len(c.calls) != 1 || c.calls[0] != ArticleTitleToSlug(tc.p.Title) {
-				t.Fatalf("checker calls = %v", c.calls)
-			}
-			if tc.want == nil {
-				if err != nil {
-					t.Fatalf("unexpected err: %v", err)
+			var p UpdateArticleParam
+			err := json.Unmarshal([]byte(tc.input), &p)
+			if tc.anyErr {
+				if err == nil {
+					t.Fatalf("expected error")
+				}
+				if tc.wantErr != nil && !errors.Is(err, tc.wantErr) {
+					t.Fatalf("err = %v", err)
 				}
 				return
 			}
-			var verr *NewArticleValidationError
-			if !errors.As(err, &verr) {
-				t.Fatalf("err = %v, want validation error", err)
+			if err != nil {
+				t.Fatalf("unexpected err: %v", err)
 			}
-			if !reflect.DeepEqual(verr.Fields, tc.want) {
-				t.Fatalf("fields = %v, want %v", verr.Fields, tc.want)
-			}
-			if _, ok := verr.Fields["tagList"]; ok {
-				t.Fatal("tagList must not be validated")
+			if p != tc.want {
+				t.Fatalf("got %+v want %+v", p, tc.want)
 			}
 		})
 	}
-}
 
-func TestValidateNewArticleParamErrors(t *testing.T) {
-	p := NewNewArticleParam("t", "d", "b", nil)
-	if err := ValidateNewArticleParam(context.Background(), p, nil); !errors.Is(err, ErrNilArticleSlugChecker) {
-		t.Fatalf("err = %v", err)
+	orig := NewUpdateArticleParam("t", "b", "d")
+	data, err := json.Marshal(orig)
+	if err != nil {
+		t.Fatal(err)
 	}
-	boom := errors.New("db down")
-	err := ValidateNewArticleParam(context.Background(), p, ArticleSlugCheckerFunc(func(context.Context, string) (bool, error) {
-		return false, boom
-	}))
-	if !errors.Is(err, boom) {
-		t.Fatalf("err = %v", err)
+	var back UpdateArticleParam
+	if err := json.Unmarshal(data, &back); err != nil {
+		t.Fatal(err)
 	}
-	var verr *NewArticleValidationError
-	if errors.As(err, &verr) {
-		t.Fatal("checker error must not be validation error")
-	}
-}
-
-func TestValidationErrorMessage(t *testing.T) {
-	e := &NewArticleValidationError{Fields: map[string][]string{
-		"title": {"a", "b"}, "body": {"c"},
-	}}
-	want := "validation failed: body: c; title: a, b"
-	if got := e.Error(); got != want {
-		t.Fatalf("got %q, want %q", got, want)
-	}
-}
-
-func TestArticleTitleToSlug(t *testing.T) {
-	tests := []struct{ in, want string }{
-		{"Hello World", "hello-world"},
-		{"How to train, your dragon?", "how-to-train-your-dragon-"},
-		{"A & B | C", "a-b-c"},
-		{"it’s “ok”.", "it-s-“ok”-"},
-		{"plain", "plain"},
-		{"", ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.in, func(t *testing.T) {
-			if got := ArticleTitleToSlug(tc.in); got != tc.want {
-				t.Fatalf("got %q, want %q", got, tc.want)
-			}
-		})
+	if back != orig || back.Title() != "t" || back.Body() != "b" || back.Description() != "d" {
+		t.Fatalf("round trip mismatch: %s -> %+v", data, back)
 	}
 }
