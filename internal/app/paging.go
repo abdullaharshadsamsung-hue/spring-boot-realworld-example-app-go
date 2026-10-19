@@ -1,67 +1,127 @@
-// Package app contains the application-layer (query/command service) types of
-// the RealWorld application.
 package app
 
-import "fmt"
+// Direction is the paging direction requested by a cursor query.
+//
+// It replaces the source's nested CursorPager.Direction enum.
+type Direction int
 
-// Pagination defaults and bounds.
 const (
-	// DefaultOffset is the offset used when none (or a non-positive one) is given.
-	DefaultOffset = 0
-	// DefaultLimit is the page size used when none (or a non-positive one) is given.
-	DefaultLimit = 20
-	// MaxLimit is the largest page size a caller may request; larger values are capped.
-	MaxLimit = 100
+	// DirectionPrev requests the page that comes before the supplied cursor.
+	DirectionPrev Direction = iota
+	// DirectionNext requests the page that comes after the supplied cursor.
+	// It is also the direction used when no cursor is supplied.
+	DirectionNext
 )
 
-// Page holds sanitized offset/limit pagination parameters.
-//
-// Fields are unexported so a Page can only hold sanitized values: build one
-// with NewPage or DefaultPage. The zero value (Page{}) is NOT equivalent to
-// the source's no-arg constructor because its limit is 0; use DefaultPage.
-//
-// Page is a comparable value type: == (or Equal) compares offset and limit,
-// matching the equals/hashCode Lombok's @Data generated, and Page can be used
-// directly as a map key.
-type Page struct {
-	offset int
-	limit  int
-}
-
-// DefaultPage returns a Page with the default offset (0) and limit (20).
-func DefaultPage() Page {
-	return Page{offset: DefaultOffset, limit: DefaultLimit}
-}
-
-// NewPage returns a Page built from caller-supplied values, sanitized rather
-// than rejected:
-//   - offset: values <= 0 are ignored and the default 0 is kept.
-//   - limit: values <= 0 are ignored and the default 20 is kept; values above
-//     MaxLimit (100) are capped at 100.
-func NewPage(offset, limit int) Page {
-	p := DefaultPage()
-	if offset > 0 {
-		p.offset = offset
+// String returns the source enum's constant name ("PREV" or "NEXT").
+func (d Direction) String() string {
+	switch d {
+	case DirectionPrev:
+		return "PREV"
+	case DirectionNext:
+		return "NEXT"
+	default:
+		return "UNKNOWN"
 	}
-	switch {
-	case limit > MaxLimit:
-		p.limit = MaxLimit
-	case limit > 0:
-		p.limit = limit
+}
+
+// Node is an item that can appear in a cursor-paginated result. Each item
+// must provide an opaque cursor that identifies its position in the
+// ordering.
+//
+// MIGRATION_NOTE: the source's Node.getCursor() returns a PageCursor object
+// that callers only ever serialize with toString(). Here Cursor returns that
+// serialized form directly, so StartCursor and EndCursor can report
+// (string, bool) as the agreed plan specifies.
+type Node interface {
+	// Cursor returns the opaque, serialized cursor for this item.
+	Cursor() string
+}
+
+// CursorPager is one page of Node items in a Relay-style cursor
+// pagination. It records whether a following or preceding page exists.
+//
+// It is a read-only value object. Build it with NewCursorPager.
+type CursorPager[T Node] struct {
+	data     []T
+	next     bool
+	previous bool
+}
+
+// NewCursorPager builds a page from data.
+//
+// hasExtra reports whether the caller's query (usually limit+1) found at
+// least one more item past this page in the requested direction.
+//   - For DirectionNext, HasNext is hasExtra and HasPrevious is false.
+//   - For any other direction (DirectionPrev), HasPrevious is hasExtra and
+//     HasNext is false.
+//
+// This matches the source exactly: any value that is not NEXT is treated
+// as PREV.
+func NewCursorPager[T Node](data []T, direction Direction, hasExtra bool) *CursorPager[T] {
+	p := &CursorPager[T]{data: data}
+	if direction == DirectionNext {
+		p.previous = false
+		p.next = hasExtra
+	} else {
+		p.next = false
+		p.previous = hasExtra
 	}
 	return p
 }
 
-// Offset returns the sanitized number of rows to skip.
-func (p Page) Offset() int { return p.offset }
+// Data returns the items supplied when the page was built.
+//
+// The returned slice is the same one passed to NewCursorPager. It is not
+// copied, which matches the source's getter.
+func (p *CursorPager[T]) Data() []T {
+	if p == nil {
+		return nil
+	}
+	return p.data
+}
 
-// Limit returns the sanitized maximum number of rows to return.
-func (p Page) Limit() int { return p.limit }
+// HasNext reports whether a following page exists.
+func (p *CursorPager[T]) HasNext() bool {
+	return p != nil && p.next
+}
 
-// Equal reports whether p and other have the same offset and limit.
-func (p Page) Equal(other Page) bool { return p == other }
+// HasPrevious reports whether a preceding page exists.
+func (p *CursorPager[T]) HasPrevious() bool {
+	return p != nil && p.previous
+}
 
-// String returns a representation like Lombok's toString: Page(offset=0, limit=20).
-func (p Page) String() string {
-	return fmt.Sprintf("Page(offset=%d, limit=%d)", p.offset, p.limit)
+// StartCursor returns the cursor of the first item on the page.
+//
+// ok is false when the page is empty. That replaces the source's null
+// return value.
+func (p *CursorPager[T]) StartCursor() (cursor string, ok bool) {
+	if p == nil || len(p.data) == 0 {
+		return "", false
+	}
+	return cursorOf(p.data[0])
+}
+
+// EndCursor returns the cursor of the last item on the page.
+//
+// ok is false when the page is empty. That replaces the source's null
+// return value.
+func (p *CursorPager[T]) EndCursor() (cursor string, ok bool) {
+	if p == nil || len(p.data) == 0 {
+		return "", false
+	}
+	return cursorOf(p.data[len(p.data)-1])
+}
+
+// cursorOf returns the cursor of item. ok is false when item is a nil
+// interface value.
+//
+// MIGRATION_NOTE: Java would throw a NullPointerException for a null
+// element. Here a nil element is reported as an absent cursor, so it cannot
+// panic.
+func cursorOf[T Node](item T) (string, bool) {
+	if any(item) == nil {
+		return "", false
+	}
+	return item.Cursor(), true
 }
