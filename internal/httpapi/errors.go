@@ -107,9 +107,9 @@ func (e *InvalidRequestError) FieldErrors() FieldErrors {
 
 var _ FieldErrorer = (*InvalidRequestError)(nil)
 
-// ErrorBody is the JSON body written for validation failures; it replaces
+// FieldErrorBody is the JSON body written for validation failures; it replaces
 // ErrorResource and its custom serializer.
-type ErrorBody struct {
+type FieldErrorBody struct {
 	Errors FieldErrors `json:"errors"`
 }
 
@@ -166,6 +166,9 @@ func StatusFor(err error) int {
 	if errors.Is(err, ErrInvalidAuthentication) {
 		return http.StatusUnprocessableEntity
 	}
+	if errors.Is(err, ErrNoAuthorization) {
+		return http.StatusForbidden
+	}
 	var sc StatusCoder
 	if errors.As(err, &sc) {
 		return sc.HTTPStatus()
@@ -208,7 +211,7 @@ func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 		if errs == nil {
 			errs = FieldErrors{}
 		}
-		writeJSON(w, r, http.StatusUnprocessableEntity, ErrorBody{Errors: errs})
+		writeJSON(w, r, http.StatusUnprocessableEntity, FieldErrorBody{Errors: errs})
 		return
 	}
 	if errors.Is(err, ErrInvalidAuthentication) {
