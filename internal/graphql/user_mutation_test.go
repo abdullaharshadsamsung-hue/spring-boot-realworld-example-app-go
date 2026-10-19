@@ -11,14 +11,14 @@ import (
 	"migrated-app/internal/httpapi"
 )
 
-type fakeUsers struct {
+type umFakeUsers struct {
 	user   *core.User
 	err    error
 	calls  int
 	gotArg string
 }
 
-func (f *fakeUsers) FindByEmail(_ context.Context, email string) (*core.User, error) {
+func (f *umFakeUsers) FindByEmail(_ context.Context, email string) (*core.User, error) {
 	f.calls++
 	f.gotArg = email
 	return f.user, f.err
@@ -71,9 +71,9 @@ func TestNewUserMutation(t *testing.T) {
 		wantErr error
 	}{
 		{"nil users", nil, &fakeMatcher{}, &fakeService{}, ErrNilUserMutationUsers},
-		{"nil matcher", &fakeUsers{}, nil, &fakeService{}, ErrNilUserMutationMatcher},
-		{"nil service", &fakeUsers{}, &fakeMatcher{}, nil, ErrNilUserMutationService},
-		{"ok", &fakeUsers{}, &fakeMatcher{}, &fakeService{}, nil},
+		{"nil matcher", &umFakeUsers{}, nil, &fakeService{}, ErrNilUserMutationMatcher},
+		{"nil service", &umFakeUsers{}, &fakeMatcher{}, nil, ErrNilUserMutationService},
+		{"ok", &umFakeUsers{}, &fakeMatcher{}, &fakeService{}, nil},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -142,7 +142,7 @@ func TestCreateUser(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			matcher := &fakeMatcher{}
-			m, err := NewUserMutation(&fakeUsers{}, matcher, tt.svc)
+			m, err := NewUserMutation(&umFakeUsers{}, matcher, tt.svc)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -193,18 +193,18 @@ func TestLogin(t *testing.T) {
 	boom := errors.New("db down")
 	tests := []struct {
 		name             string
-		users            *fakeUsers
+		users            *umFakeUsers
 		match            bool
 		wantMatcherCalls int
 		wantUser         *core.User
 		wantInvalidAuth  bool
 		wantErr          error
 	}{
-		{"success", &fakeUsers{user: stored}, true, 1, stored, false, nil},
-		{"unknown email", &fakeUsers{err: core.ErrNotFound}, true, 0, nil, true, nil},
-		{"wrong password", &fakeUsers{user: stored}, false, 1, nil, true, nil},
-		{"nil user", &fakeUsers{}, true, 0, nil, true, nil},
-		{"repo failure", &fakeUsers{err: boom}, true, 0, nil, false, boom},
+		{"success", &umFakeUsers{user: stored}, true, 1, stored, false, nil},
+		{"unknown email", &umFakeUsers{err: core.ErrNotFound}, true, 0, nil, true, nil},
+		{"wrong password", &umFakeUsers{user: stored}, false, 1, nil, true, nil},
+		{"nil user", &umFakeUsers{}, true, 0, nil, true, nil},
+		{"repo failure", &umFakeUsers{err: boom}, true, 0, nil, false, boom},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -247,7 +247,7 @@ func TestLogin(t *testing.T) {
 
 func TestUpdateUserAnonymous(t *testing.T) {
 	svc := &fakeService{}
-	m, _ := NewUserMutation(&fakeUsers{}, &fakeMatcher{}, svc)
+	m, _ := NewUserMutation(&umFakeUsers{}, &fakeMatcher{}, svc)
 	email := "x@y.z"
 	res, err := m.UpdateUser(context.Background(), UpdateUserInput{Email: &email})
 	if res != nil || err != nil {
