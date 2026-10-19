@@ -23,7 +23,7 @@ func (f *fakeTagsQuerier) AllTags(ctx context.Context) ([]string, error) {
 	return f.tags, f.err
 }
 
-func newTestMux(t *testing.T, q TagsQuerier) *http.ServeMux {
+func newTagsTestMux(t *testing.T, q TagsQuerier) *http.ServeMux {
 	t.Helper()
 	h, err := NewTagsHandler(q)
 	if err != nil {
@@ -63,7 +63,7 @@ func TestGetTags_Success(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			q := &fakeTagsQuerier{tags: tc.tags}
-			mux := newTestMux(t, q)
+			mux := newTagsTestMux(t, q)
 			req := httptest.NewRequest(http.MethodGet, tc.target, nil)
 			for k, v := range tc.headers {
 				req.Header.Set(k, v)
@@ -109,7 +109,7 @@ func TestTags_UnsupportedMethods(t *testing.T) {
 	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete, http.MethodPatch} {
 		t.Run(m, func(t *testing.T) {
 			q := &fakeTagsQuerier{tags: []string{"a"}}
-			mux := newTestMux(t, q)
+			mux := newTagsTestMux(t, q)
 			rec := httptest.NewRecorder()
 			mux.ServeHTTP(rec, httptest.NewRequest(m, "/tags", strings.NewReader(`{"tags":["x"]}`)))
 			if rec.Code != http.StatusMethodNotAllowed {
