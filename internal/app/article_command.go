@@ -131,7 +131,7 @@ func (s *ArticleCommandService) CreateArticle(ctx context.Context, param NewArti
 			return nil, err
 		}
 	}
-	article := core.NewArticle(
+	article, err := core.NewArticle(
 		param.Title,
 		param.Description,
 		param.Body,
@@ -139,6 +139,9 @@ func (s *ArticleCommandService) CreateArticle(ctx context.Context, param NewArti
 		creator.ID,
 		s.now(),
 	)
+	if err != nil {
+		return nil, fmt.Errorf("create article: build article: %w", err)
+	}
 	if err := s.repo.Save(ctx, article); err != nil {
 		return nil, fmt.Errorf("create article: save: %w", err)
 	}
