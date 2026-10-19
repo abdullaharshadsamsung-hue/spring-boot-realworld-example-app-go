@@ -1,90 +1,273 @@
 package core
 
 import (
+	"context"
+	"errors"
 	"regexp"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
 
-func TestCoreCmtNewAssignsFields(t *testing.T) {
-	uuidRe := regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
-	before := time.Now()
-	c, err := NewComment("Nice article", "user-1", "article-1")
-	after := time.Now()
-	if err != nil {
-		t.Fatalf("unexpected error: %v", err)
+var uuidV4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+
+var errInvalidComment = errors.New("invalid comment")
+
+type memCommentRepo struct {
+	mu   sync.Mutex
+	rows map[string]Comment
+}
+
+func newMemCommentRepo() *memCommentRepo {
+	return &memCommentRepo{rows: map[string]Comment{}}
+}
+
+var _ CommentRepository = (*memCommentRepo)(nil)
+
+func (r *memCommentRepo) Save(_ context.Context, c *Comment) error {
+	if c == nil || c.ID() == "" || c.ArticleID() == "" || c.UserID() == "" {
+		return errInvalidComment
 	}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.rows[c.ID()] = *c
+	return nil
+}
+
+func (r *memCommentRepo) FindByID(_ context.Context, articleID, id string) (*Comment, bool, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	c, ok := r.rows[id]
+	if !ok || c.ArticleID() != articleID {
+		return nil, false, nil
+	}
+	cp := c
+	return &cp, true, nil
+}
+
+func (r *memCommentRepo) Remove(_ context.Context, c *Comment) error {
 	if c == nil {
-		t.Fatal("expected non-nil comment")
+		return errInvalidComment
 	}
-	if c.Body() != "Nice article" || c.UserID() != "user-1" || c.ArticleID() != "article-1" {
-		t.Errorf("fields mismatch: %q %q %q", c.Body(), c.UserID(), c.ArticleID())
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	delete(r.rows, c.ID())
+	return nil
+}
+
+func TestNewComment(t *testing.T) {
+	before := time.Now().UTC().Add(-time.Millisecond)
+	c := NewComment("body", "u1", "a1")
+	after := time.Now().UTC().Add(time.Millisecond)
+	if !uuidV4Re.MatchString(c.ID()) {
+		t.Fatalf("bad id %q", c.ID())
 	}
-	if !uuidRe.MatchString(c.ID()) {
-		t.Errorf("ID %q is not a canonical v4 UUID", c.ID())
+	if c.Body() != "body" || c.UserID() != "u1" || c.ArticleID() != "a1" {
+		t.Fatalf("fields mismatch: %+v", c)
 	}
-	if c.CreatedAt().Before(before) || c.CreatedAt().After(after) {
-		t.Errorf("CreatedAt %v not within [%v, %v]", c.CreatedAt(), before, after)
+	ca := c.CreatedAt()
+	if ca.Location() != time.UTC {
+		t.Errorf("expected UTC")
+	}
+	if ca.Nanosecond()%int(time.Millisecond) != 0 {
+		t.Errorf("not ms truncated: %v", ca)
+	}
+	if ca.Before(before) || ca.After(after) {
+		t.Errorf("createdAt %v out of range", ca)
+	}
+	if NewComment("b", "u", "a").ID() == c.ID() {
+		t.Errorf("ids should be unique")
 	}
 }
 
-func TestCoreCmtNewUniqueIDs(t *testing.T) {
-	a, err := NewComment("b", "u", "a")
-	if err != nil {
+func TestNewCommentIDUnique(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 1000; i++ {
+		id := newCommentID()
+		if !uuidV4Re.MatchString(id) {
+			t.Fatalf("bad id %q", id)
+		}
+		if seen[id] {
+			t.Fatalf("dup id %q", id)
+		}
+		seen[id] = true
+	}
+}
+
+func TestRestoreComment(t *testing.T) {
+	ts := time.Date(2020, 1, 2, 3, 4, 5, 123456789, time.FixedZone("x", 3600))
+	tests := []struct {
+		name, id, body, user, article string
+	}{
+		{"normal", "id1", "hello", "u", "a"},
+		{"empty", "", "", "", ""},
+		{"unicode", "id2", "héllo\n\t世界", "u2", "a2"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := RestoreComment(tt.id, tt.body, tt.user, tt.article, ts)
+			if c.ID() != tt.id || c.Body() != tt.body || c.UserID() != tt.user || c.ArticleID() != tt.article || !c.CreatedAt().Equal(ts) || c.CreatedAt().Location() != ts.Location() {
+				t.Fatalf("mismatch")
+			}
+		})
+	}
+}
+
+func TestCommentEqualAndHashKey(t *testing.T) {
+	now := time.Now()
+	a := RestoreComment("x", "b1", "u1", "a1", now)
+	b := RestoreComment("x", "b2", "u2", "a2", now.Add(time.Hour))
+	c := RestoreComment("y", "b1", "u1", "a1", now)
+	var n1, n2 *Comment
+	tests := []struct {
+		name string
+		l, r *Comment
+		want bool
+	}{
+		{"same id diff fields", a, b, true},
+		{"diff id", a, c, false},
+		{"self", a, a, true},
+		{"both nil", n1, n2, true},
+		{"nil left", nil, a, false},
+		{"nil right", a, nil, false},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := tt.l.Equal(tt.r); got != tt.want {
+				t.Fatalf("got %v want %v", got, tt.want)
+			}
+			if tt.want && tt.l.HashKey() != tt.r.HashKey() {
+				t.Fatalf("hash inconsistent")
+			}
+		})
+	}
+	if n1.HashKey() != "" || a.HashKey() != "x" {
+		t.Fatalf("hashkey wrong")
+	}
+}
+
+func TestRepoSave(t *testing.T) {
+	ctx := context.Background()
+	long := strings.Repeat("ab ", 10000)
+	tests := []struct {
+		name    string
+		c       *Comment
+		wantErr bool
+	}{
+		{"valid", NewComment("body", "u", "a"), false},
+		{"arbitrary body", NewComment("  <script>'\"; DROP TABLE\n😀 "+long, "u", "a"), false},
+		{"empty body", NewComment("", "u", "a"), false},
+		{"nil", nil, true},
+		{"missing article", NewComment("b", "u", ""), true},
+		{"missing user", NewComment("b", "", "a"), true},
+		{"missing id", RestoreComment("", "b", "u", "a", time.Now()), true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newMemCommentRepo()
+			err := r.Save(ctx, tt.c)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatal("expected error")
+				}
+				if len(r.rows) != 0 {
+					t.Fatal("partial record stored")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			got, found, err := r.FindByID(ctx, tt.c.ArticleID(), tt.c.ID())
+			if err != nil || !found || got == nil {
+				t.Fatalf("not found: %v", err)
+			}
+			if !got.Equal(tt.c) || got.Body() != tt.c.Body() || got.UserID() != tt.c.UserID() ||
+				got.ArticleID() != tt.c.ArticleID() || !got.CreatedAt().Equal(tt.c.CreatedAt()) {
+				t.Fatal("round trip mismatch")
+			}
+		})
+	}
+}
+
+func TestRepoFindByID(t *testing.T) {
+	ctx := context.Background()
+	r := newMemCommentRepo()
+	saved := NewComment("b", "u", "a1")
+	removed := NewComment("r", "u", "a1")
+	for _, c := range []*Comment{saved, removed} {
+		if err := r.Save(ctx, c); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := r.Remove(ctx, removed); err != nil {
 		t.Fatal(err)
 	}
-	b, err := NewComment("b", "u", "a")
-	if err != nil {
-		t.Fatal(err)
+	tests := []struct {
+		name, article, id string
+		want              bool
+	}{
+		{"existing", "a1", saved.ID(), true},
+		{"other article", "a2", saved.ID(), false},
+		{"missing id", "a1", "nope", false},
+		{"removed", "a1", removed.ID(), false},
 	}
-	if a.ID() == b.ID() {
-		t.Fatal("expected distinct ids")
-	}
-	if a.Equal(b) {
-		t.Fatal("comments with different ids should not be equal")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := len(r.rows)
+			got, found, err := r.FindByID(ctx, tt.article, tt.id)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if found != tt.want {
+				t.Fatalf("found=%v", found)
+			}
+			if !found && got != nil {
+				t.Fatal("expected nil comment")
+			}
+			if found && (got.ID() != tt.id || got.ArticleID() != tt.article) {
+				t.Fatal("key mismatch")
+			}
+			if len(r.rows) != before {
+				t.Fatal("find mutated store")
+			}
+		})
 	}
 }
 
-func TestCoreCmtRestore(t *testing.T) {
-	ts := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
-	c := RestoreComment("id-1", "body", "u1", "a1", ts)
-	if c.ID() != "id-1" || c.Body() != "body" || c.UserID() != "u1" || c.ArticleID() != "a1" {
-		t.Errorf("fields mismatch")
+func TestRepoRemove(t *testing.T) {
+	ctx := context.Background()
+	tests := []struct {
+		name     string
+		saveTarg bool
+	}{
+		{"existing", true},
+		{"not stored", false},
 	}
-	if !c.CreatedAt().Equal(ts) {
-		t.Errorf("CreatedAt = %v, want %v", c.CreatedAt(), ts)
-	}
-}
-
-func TestCoreCmtEqualityAndHashKey(t *testing.T) {
-	t1 := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	x1 := RestoreComment("x", "b1", "u1", "a1", t1)
-	x2 := RestoreComment("x", "b2", "u2", "a2", t1.Add(time.Hour))
-	y := RestoreComment("y", "b1", "u1", "a1", t1)
-	var n *Comment
-
-	if !x1.Equal(x2) || !x2.Equal(x1) {
-		t.Error("same id should be equal")
-	}
-	if x1.HashKey() != x2.HashKey() {
-		t.Error("equal comments should share hash key")
-	}
-	if x1.Equal(y) {
-		t.Error("different ids should not be equal")
-	}
-	if x1.Equal(n) || n.Equal(x1) {
-		t.Error("nil vs non-nil should not be equal")
-	}
-	if !n.Equal(n) {
-		t.Error("two nils should be equal")
-	}
-	if n.HashKey() != "" {
-		t.Error("nil HashKey should be empty")
-	}
-	m := map[string]*Comment{}
-	m[x1.HashKey()] = x1
-	m[x2.HashKey()] = x2
-	if len(m) != 1 {
-		t.Errorf("expected 1 map entry, got %d", len(m))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newMemCommentRepo()
+			target := NewComment("t", "u", "a")
+			sibling := NewComment("s", "u", "a")
+			other := NewComment("o", "u", "b")
+			for _, c := range []*Comment{sibling, other} {
+				_ = r.Save(ctx, c)
+			}
+			if tt.saveTarg {
+				_ = r.Save(ctx, target)
+			}
+			if err := r.Remove(ctx, target); err != nil {
+				t.Fatal(err)
+			}
+			if _, f, _ := r.FindByID(ctx, "a", target.ID()); f {
+				t.Fatal("target still present")
+			}
+			for _, c := range []*Comment{sibling, other} {
+				if _, f, _ := r.FindByID(ctx, c.ArticleID(), c.ID()); !f {
+					t.Fatalf("collateral delete of %s", c.Body())
+				}
+			}
+		})
 	}
 }
