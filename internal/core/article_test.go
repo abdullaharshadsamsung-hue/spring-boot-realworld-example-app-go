@@ -1,239 +1,221 @@
 package core
 
 import (
-	"encoding/json"
 	"regexp"
-	"strings"
 	"testing"
+	"time"
 )
 
-var uuidV4Re = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
+var uuidRe = regexp.MustCompile(`^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$`)
 
-func TestNewTag(t *testing.T) {
+func TestNewArticleSlug(t *testing.T) {
 	tests := []struct {
-		name    string
-		tagName string
+		title, want string
 	}{
-		{"simple", "java"},
-		{"empty", ""},
-		{"whitespace preserved", "  Go Lang  "},
-		{"case preserved", "JaVa"},
-		{"unicode", "日本語"},
+		{"a new   title", "a-new-title"},
+		{"a new title 2", "a-new-title-2"},
+		{"A NEW TITLE", "a-new-title"},
+		{"中文：标题", "中文-标题"},
+		{"what?the.hell,w", "what-the-hell-w"},
 	}
 	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tag := NewTag(tc.tagName)
-			if tag == nil {
-				t.Fatal("NewTag returned nil")
-			}
-			if tag.Name != tc.tagName {
-				t.Errorf("Name = %q, want %q", tag.Name, tc.tagName)
-			}
-			if tag.ID == "" {
-				t.Error("ID is empty")
-			}
-			if len(tag.ID) != 36 {
-				t.Errorf("ID length = %d, want 36", len(tag.ID))
-			}
-			if !uuidV4Re.MatchString(tag.ID) {
-				t.Errorf("ID %q is not a canonical v4 UUID", tag.ID)
+		t.Run(tc.title, func(t *testing.T) {
+			a := NewArticle(tc.title, "desc", "body", []string{"java"}, "123", time.Time{})
+			if a.Slug != tc.want {
+				t.Errorf("slug = %q, want %q", a.Slug, tc.want)
 			}
 		})
 	}
 }
 
-func TestNewTagSameNameDifferentIDsButEqual(t *testing.T) {
-	a, b := NewTag("java"), NewTag("java")
-	if a.ID == b.ID {
-		t.Errorf("expected different IDs, both %q", a.ID)
+func TestToSlug(t *testing.T) {
+	tests := []struct {
+		in, want string
+	}{
+		{"Hello & World", "hello-world"},
+		{"a|b", "a-b"},
+		{"it’s “quoted”", "it-s-“quoted-"},
+		{"tab\tnew\nline\x0Bvt", "tab-new-line-vt"},
+		{"", ""},
+		{"Simple", "simple"},
 	}
-	if !a.Equal(b) || !b.Equal(a) {
-		t.Error("tags with same name should be equal")
-	}
-	if a.Key() != b.Key() {
-		t.Error("equal tags should have equal keys")
+	for _, tc := range tests {
+		t.Run(tc.in, func(t *testing.T) {
+			got := ToSlug(tc.in)
+			if got != tc.want {
+				t.Errorf("ToSlug(%q) = %q, want %q", tc.in, got, tc.want)
+			}
+			if again := ToSlug(tc.in); again != got {
+				t.Errorf("not deterministic: %q vs %q", got, again)
+			}
+		})
 	}
 }
 
-func TestNewTagUniqueIDs(t *testing.T) {
-	seen := make(map[string]bool)
-	for i := 0; i < 1000; i++ {
-		id := NewTag("x").ID
+func TestNewArticleFields(t *testing.T) {
+	created := time.Date(2020, 1, 2, 3, 4, 5, 0, time.UTC)
+	a := NewArticle("Title", "desc", "body", []string{"java", "java", "spring"}, "u1", created)
+
+	if a.Title != "Title" || a.Description != "desc" || a.Body != "body" || a.UserID != "u1" {
+		t.Errorf("unexpected fields: %+v", a)
+	}
+	if !uuidRe.MatchString(a.ID) {
+		t.Errorf("id %q is not a v4 UUID", a.ID)
+	}
+	if !a.CreatedAt.Equal(created) || !a.UpdatedAt.Equal(created) {
+		t.Errorf("timestamps = %v/%v, want %v", a.CreatedAt, a.UpdatedAt, created)
+	}
+	if len(a.Tags) != 2 {
+		t.Fatalf("tags len = %d, want 2", len(a.Tags))
+	}
+	names := map[string]bool{}
+	for _, tg := range a.Tags {
+		names[tg.Name] = true
+		if !uuidRe.MatchString(tg.ID) {
+			t.Errorf("tag id %q invalid", tg.ID)
+		}
+	}
+	if !names["java"] || !names["spring"] {
+		t.Errorf("tags = %v", a.Tags)
+	}
+}
+
+func TestNewArticleDefaultsAndEdgeCases(t *testing.T) {
+	before := time.Now()
+	a := NewArticle("", "", "", nil, "u", time.Time{})
+	after := time.Now()
+	if a.CreatedAt.Before(before) || a.CreatedAt.After(after) {
+		t.Errorf("createdAt %v not within [%v,%v]", a.CreatedAt, before, after)
+	}
+	if !a.UpdatedAt.Equal(a.CreatedAt) {
+		t.Errorf("updatedAt != createdAt")
+	}
+	// Go analogue of null title/tagList: no panic, empty values.
+	if a.Slug != "" {
+		t.Errorf("slug = %q", a.Slug)
+	}
+	if a.Tags == nil || len(a.Tags) != 0 {
+		t.Errorf("tags = %#v, want empty non-nil", a.Tags)
+	}
+}
+
+func TestArticleEquality(t *testing.T) {
+	a := NewArticle("t", "d", "b", []string{"x"}, "u", time.Time{})
+	b := NewArticle("t", "d", "b", []string{"x"}, "u", time.Time{})
+	sameID := &Article{ID: a.ID, Title: "other"}
+	var nilA *Article
+
+	tests := []struct {
+		name string
+		x, y *Article
+		want bool
+	}{
+		{"identical inputs differ", a, b, false},
+		{"same id equal", a, sameID, true},
+		{"self", a, a, true},
+		{"nil vs nil", nilA, nil, true},
+		{"nil vs non-nil", nilA, a, false},
+		{"non-nil vs nil", a, nil, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.x.Equal(tc.y); got != tc.want {
+				t.Errorf("Equal = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if a.ID == b.ID {
+		t.Errorf("ids should differ")
+	}
+}
+
+func TestArticleUpdate(t *testing.T) {
+	created := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name                    string
+		title, desc, body       string
+		wantTitle, wantSlug     string
+		wantDesc, wantBody      string
+		wantUpdated             bool
+	}{
+		{"title", "New Title?", "", "", "New Title?", "new-title-", "desc", "body", true},
+		{"description", "", "nd", "", "Old Title", "old-title", "nd", "body", true},
+		{"body", "", "", "nb", "Old Title", "old-title", "desc", "nb", true},
+		{"all", "X Y", "nd", "nb", "X Y", "x-y", "nd", "nb", true},
+		{"none", "", "", "", "Old Title", "old-title", "desc", "body", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			a := NewArticle("Old Title", "desc", "body", []string{"a", "b"}, "u", created)
+			id, tags := a.ID, append([]Tag(nil), a.Tags...)
+			before := time.Now()
+			a.Update(tc.title, tc.desc, tc.body)
+
+			if a.Title != tc.wantTitle || a.Slug != tc.wantSlug || a.Description != tc.wantDesc || a.Body != tc.wantBody {
+				t.Errorf("got %+v", a)
+			}
+			if a.Slug != ToSlug(a.Title) {
+				t.Errorf("slug out of sync with title")
+			}
+			if tc.wantUpdated {
+				if a.UpdatedAt.Before(before) {
+					t.Errorf("updatedAt not refreshed: %v", a.UpdatedAt)
+				}
+			} else if !a.UpdatedAt.Equal(created) {
+				t.Errorf("updatedAt changed: %v", a.UpdatedAt)
+			}
+			if a.ID != id || a.UserID != "u" || !a.CreatedAt.Equal(created) {
+				t.Errorf("immutable fields changed")
+			}
+			if len(a.Tags) != len(tags) {
+				t.Fatalf("tags changed")
+			}
+			for i := range tags {
+				if a.Tags[i] != tags[i] {
+					t.Errorf("tag %d changed", i)
+				}
+			}
+		})
+	}
+}
+
+func TestTag(t *testing.T) {
+	a := NewTag("go")
+	b := NewTag("go")
+	c := NewTag("rust")
+	tests := []struct {
+		name string
+		x, y Tag
+		want bool
+	}{
+		{"same name diff id", a, b, true},
+		{"diff name", a, c, false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.x.Equal(tc.y); got != tc.want {
+				t.Errorf("Equal = %v, want %v", got, tc.want)
+			}
+		})
+	}
+	if a.ID == b.ID {
+		t.Errorf("tag ids should differ")
+	}
+	if a.Key() != "go" || a.String() != "go" {
+		t.Errorf("Key/String = %q/%q", a.Key(), a.String())
+	}
+}
+
+func TestNewRandomUUIDForCore(t *testing.T) {
+	seen := map[string]bool{}
+	for i := 0; i < 100; i++ {
+		id := newRandomUUIDForCore()
+		if !uuidRe.MatchString(id) {
+			t.Fatalf("invalid uuid %q", id)
+		}
 		if seen[id] {
-			t.Fatalf("duplicate ID %q", id)
+			t.Fatalf("duplicate uuid %q", id)
 		}
 		seen[id] = true
-	}
-}
-
-func TestNewRandomUUIDFormat(t *testing.T) {
-	for i := 0; i < 100; i++ {
-		id := newRandomUUID()
-		if !uuidV4Re.MatchString(id) {
-			t.Fatalf("invalid UUID %q", id)
-		}
-	}
-}
-
-func TestZeroValueTag(t *testing.T) {
-	var tag Tag
-	if tag.ID != "" || tag.Name != "" {
-		t.Errorf("zero Tag = %+v, want empty fields", tag)
-	}
-	if got := tag.String(); got != "Tag(id=, name=)" {
-		t.Errorf("String() = %q", got)
-	}
-}
-
-func TestTagJSONDecodeAndEncode(t *testing.T) {
-	var tag Tag
-	if err := json.Unmarshal([]byte(`{"id":"abc","name":"go"}`), &tag); err != nil {
-		t.Fatal(err)
-	}
-	if tag.ID != "abc" || tag.Name != "go" {
-		t.Errorf("decoded = %+v", tag)
-	}
-	out, err := json.Marshal(tag)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(out) != `{"id":"abc","name":"go"}` {
-		t.Errorf("encoded = %s", out)
-	}
-}
-
-func TestTagSetGet(t *testing.T) {
-	tests := []struct {
-		name string
-		id   string
-		tn   string
-	}{
-		{"values", "id-1", "java"},
-		{"empty", "", ""},
-		{"whitespace", " ", " "},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			tag := NewTag("orig")
-			tag.ID = tc.id
-			tag.Name = tc.tn
-			if tag.ID != tc.id || tag.Name != tc.tn {
-				t.Errorf("got %+v", tag)
-			}
-		})
-	}
-}
-
-func TestTagEqual(t *testing.T) {
-	tests := []struct {
-		name string
-		a, b *Tag
-		want bool
-	}{
-		{"same name diff ids", &Tag{ID: "1", Name: "java"}, &Tag{ID: "2", Name: "java"}, true},
-		{"diff names same id", &Tag{ID: "1", Name: "java"}, &Tag{ID: "1", Name: "go"}, false},
-		{"case differs", &Tag{ID: "1", Name: "Java"}, &Tag{ID: "1", Name: "java"}, false},
-		{"both empty names", &Tag{ID: "1"}, &Tag{ID: "2"}, true},
-		{"nil other", &Tag{Name: "java"}, nil, false},
-		{"nil receiver", nil, &Tag{Name: "java"}, false},
-		{"both nil", nil, nil, true},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.a.Equal(tc.b); got != tc.want {
-				t.Errorf("a.Equal(b) = %v, want %v", got, tc.want)
-			}
-			if got := tc.b.Equal(tc.a); got != tc.want {
-				t.Errorf("symmetry: b.Equal(a) = %v, want %v", got, tc.want)
-			}
-			if tc.want && tc.a.Key() != tc.b.Key() {
-				t.Errorf("equal tags have different keys %q vs %q", tc.a.Key(), tc.b.Key())
-			}
-		})
-	}
-}
-
-func TestTagEqualReflexiveTransitive(t *testing.T) {
-	a := &Tag{ID: "1", Name: "x"}
-	b := &Tag{ID: "2", Name: "x"}
-	c := &Tag{ID: "3", Name: "x"}
-	if !a.Equal(a) {
-		t.Error("not reflexive")
-	}
-	if !(a.Equal(b) && b.Equal(c) && a.Equal(c)) {
-		t.Error("not transitive")
-	}
-}
-
-func TestTagKey(t *testing.T) {
-	tests := []struct {
-		name string
-		tag  *Tag
-		want string
-	}{
-		{"name only", &Tag{ID: "abc", Name: "java"}, "java"},
-		{"empty", &Tag{}, ""},
-		{"nil", nil, ""},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.tag.Key(); got != tc.want {
-				t.Errorf("Key() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestTagSetDeduplicatesByName(t *testing.T) {
-	tags := []*Tag{NewTag("java"), NewTag("go"), NewTag("java"), NewTag("Java")}
-	set := make(map[string]*Tag)
-	for _, tg := range tags {
-		set[tg.Key()] = tg
-	}
-	if len(set) != 3 {
-		t.Errorf("set size = %d, want 3", len(set))
-	}
-}
-
-func TestTagString(t *testing.T) {
-	tests := []struct {
-		name string
-		tag  *Tag
-		want string
-	}{
-		{"populated", &Tag{ID: "id-1", Name: "java"}, "Tag(id=id-1, name=java)"},
-		{"empty", &Tag{}, "Tag(id=, name=)"},
-		{"nil", nil, "Tag(<nil>)"},
-	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if got := tc.tag.String(); got != tc.want {
-				t.Errorf("String() = %q, want %q", got, tc.want)
-			}
-		})
-	}
-}
-
-func TestTagStringContainsGeneratedID(t *testing.T) {
-	tag := NewTag("java")
-	s := tag.String()
-	if !strings.Contains(s, tag.ID) || !strings.Contains(s, "java") {
-		t.Errorf("String() = %q missing id or name", s)
-	}
-}
-
-func TestIsEmptyHelper(t *testing.T) {
-	tests := []struct {
-		in   string
-		want bool
-	}{
-		{"", true},
-		{" ", false},
-		{"a", false},
-	}
-	for _, tc := range tests {
-		if got := isEmpty(tc.in); got != tc.want {
-			t.Errorf("isEmpty(%q) = %v, want %v", tc.in, got, tc.want)
-		}
 	}
 }
