@@ -16,10 +16,10 @@ import (
 // Validation messages copied from the source annotations so the wire output
 // stays compatible with the Spring implementation.
 const (
-	msgCantBeEmpty       = "can't be empty"
-	msgShouldBeEmail     = "should be an email"
-	msgDuplicatedEmail   = "duplicated email"
-	msgDuplicatedUsernam = "duplicated username"
+	msgCantBeEmpty        = "can't be empty"
+	msgShouldBeEmail      = "should be an email"
+	msgDuplicatedEmail    = "duplicated email"
+	msgDuplicatedUsername = "duplicated username"
 )
 
 // RegisterParam is the payload of POST /users. On the wire it is wrapped
@@ -36,7 +36,7 @@ type registerParamEnvelope struct {
 	User RegisterParam `json:"user"`
 }
 
-// NewRegisterParam builds a RegisterParam from its fields.
+// NewRegisterParam builds a RegisterParam from its fields (Lombok @AllArgsConstructor).
 func NewRegisterParam(email, username, password string) RegisterParam {
 	return RegisterParam{Email: email, Username: username, Password: password}
 }
@@ -161,7 +161,7 @@ func (p RegisterParam) Validate(ctx context.Context, finder RegisterUserFinder) 
 			return fmt.Errorf("validate register param: find by username: %w", err)
 		}
 		if found {
-			verr.add("username", msgDuplicatedUsernam)
+			verr.add("username", msgDuplicatedUsername)
 		}
 	}
 
@@ -182,7 +182,7 @@ type UserRegistrationRepository interface {
 	Save(ctx context.Context, user *core.User) error
 }
 
-// PasswordHasher hashes plaintext passwords before storage (Q1 fix).
+// PasswordHasher hashes plaintext passwords before storage.
 type PasswordHasher interface {
 	// Hash returns the encoded password.
 	Hash(plain string) (string, error)
@@ -217,11 +217,17 @@ func (s *UserService) CreateUser(ctx context.Context, p RegisterParam) (*core.Us
 	if err != nil {
 		return nil, fmt.Errorf("create user: hash password: %w", err)
 	}
-	// MIGRATION_NOTE: assumes core.NewUser(email, username, password, bio, image)
-	// mirrors the Java User constructor; verify against internal/core/user.go.
-	user := core.NewUser(p.Email, p.Username, hashed, "", s.defaultImage)
-	if err := s.repo.Save(ctx, user); err != nil {
+	// core.NewUser returns (*User, error); argument order mirrors the Java
+	// User(email, username, password, bio, image) constructor.
+	u, err := core.NewUser(p.Email, p.Username, hashed, "", s.defaultImage)
+	if err != nil {
+		return nil, fmt.Errorf("create user: build user: %w", err)
+	}
+	if u == nil {
+		return nil, errors.New("create user: build user: nil user")
+	}
+	if err := s.repo.Save(ctx, u); err != nil {
 		return nil, fmt.Errorf("create user: save: %w", err)
 	}
-	return user, nil
+	return u, nil
 }
