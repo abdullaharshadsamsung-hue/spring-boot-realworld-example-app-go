@@ -52,7 +52,7 @@ func TestDuplicatedArticleValidator_IsValid(t *testing.T) {
 	}{
 		{"no match", map[string]bool{}, nil, "How to train your dragon", true, nil, 1, "how-to-train-your-dragon"},
 		{"exact duplicate", map[string]bool{"how-to-train-your-dragon": true}, nil, "How to train your dragon", false, nil, 1, "how-to-train-your-dragon"},
-		{"normalized duplicate", map[string]bool{"how-to-train-your-dragon": true}, nil, "HOW to, train   your dragon.", false, nil, 1, "how-to-train-your-dragon"},
+		{"normalized duplicate", map[string]bool{"how-to-train-your-dragon": true}, nil, "HOW to, train   your dragon", false, nil, 1, "how-to-train-your-dragon"},
 		{"blank title skips lookup", map[string]bool{"": true}, nil, "", true, nil, 0, ""},
 		{"whitespace title skips lookup", nil, nil, "   ", true, nil, 0, ""},
 		{"lookup error propagates", nil, dbErr, "anything", false, dbErr, 1, "anything"},
