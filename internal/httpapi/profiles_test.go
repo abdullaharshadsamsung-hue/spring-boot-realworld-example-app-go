@@ -143,7 +143,7 @@ func TestProfilesHandler(t *testing.T) {
 				rels[[2]string{viewer.ID, target.ID}] = true
 			}
 			repo := &fakeRepo{users: map[string]*core.User{"username": target}, relations: rels, findErr: tt.findErr, saveErr: tt.saveErr}
-			q := &fakeQuerier{
+			q := &fakeProfileQuerier{
 				profiles: map[string]app.ProfileData{"username": app.NewProfileData(target.ID, "username", "", "", false)},
 				follows:  rels,
 				err:      tt.queryErr,
@@ -219,7 +219,7 @@ func TestProfilesHandler(t *testing.T) {
 
 func TestGetProfileIsReadOnly(t *testing.T) {
 	repo := &fakeRepo{users: map[string]*core.User{}, relations: map[[2]string]bool{}}
-	q := &fakeQuerier{profiles: map[string]app.ProfileData{"u": {ID: "1", Username: "u"}}}
+	q := &fakeProfileQuerier{profiles: map[string]app.ProfileData{"u": {ID: "1", Username: "u"}}}
 	h, _ := NewProfilesHandler(q, repo)
 	mux := http.NewServeMux()
 	h.Register(mux)
