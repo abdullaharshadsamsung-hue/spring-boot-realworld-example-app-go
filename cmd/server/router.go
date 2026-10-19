@@ -60,6 +60,13 @@ func buildAPI() (http.Handler, error) {
 	}
 	cancel()
 
+	schemaCtx, schemaCancel := context.WithTimeout(context.Background(), 30*time.Second)
+	err = store.EnsureSchema(schemaCtx, db)
+	schemaCancel()
+	if err != nil {
+		return nil, fmt.Errorf("create schema: %w", err)
+	}
+
 	jwt, err := auth.NewJWTService(cfg.JWTSecret, int(cfg.JWTSessionTime/time.Second))
 	if err != nil {
 		return nil, fmt.Errorf("jwt service: %w", err)
