@@ -18,3 +18,8 @@ import "errors"
 // GraphQL error mapper should keep that behaviour: do not map this error to
 // UNAUTHENTICATED/401 unless that change is deliberately accepted.
 var ErrUnauthenticated = errors.New("authentication required")
+
+// ErrNotFound is the sentinel returned (possibly wrapped) by repository
+// ports when the requested entity does not exist. It replaces Java's
+// Optional.empty(). Check for it with errors.Is(err, core.ErrNotFound).
+var ErrNotFound = errors.New("not found")
