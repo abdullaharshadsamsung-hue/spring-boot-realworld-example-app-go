@@ -2,7 +2,6 @@ package app
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -181,7 +180,10 @@ func (s *UserService) CreateUser(ctx context.Context, email, username, password 
 	if err != nil {
 		return nil, fmt.Errorf("app: hash password: %w", err)
 	}
-	user := core.NewUser(email, username, hashed, "", s.defaultImage)
+	user, err := core.NewUser(email, username, hashed, "", s.defaultImage)
+	if err != nil {
+		return nil, fmt.Errorf("app: new user: %w", err)
+	}
 	if err := s.repo.Save(ctx, user); err != nil {
 		return nil, fmt.Errorf("app: save new user: %w", err)
 	}
