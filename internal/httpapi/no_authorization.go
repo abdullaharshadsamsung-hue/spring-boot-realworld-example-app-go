@@ -36,11 +36,17 @@ func ForbiddenStatusFor(err error) int {
 // ErrNoAuthorization to 403 Forbidden and delegating every other error to
 // WriteError.
 func WriteAuthzError(w http.ResponseWriter, r *http.Request, err error) {
-	if !errors.Is(err, ErrNoAuthorization) {
-		WriteError(w, r, err)
-		return
+	if err != nil && !errors.Is(err, ErrNoAuthorization) {
+		var fe FieldErrorer
+		if errors.As(err, &fe) || errors.Is(err, ErrInvalidAuthentication) {
+			WriteError(w, r, err)
+			return
+		}
 	}
-	status := http.StatusForbidden
+	status := http.StatusInternalServerError
+	if err != nil {
+		status = ForbiddenStatusFor(err)
+	}
 	body := ErrorBody{
 		Timestamp: now().Format(timestampLayout),
 		Status:    status,
