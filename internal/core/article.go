@@ -1,76 +1,178 @@
-// Package core contains the persistence-agnostic domain model of the
-// RealWorld (Conduit) application.
 package core
 
 import (
 	"crypto/rand"
-	"fmt"
+	"encoding/hex"
+	mrand "math/rand/v2"
+	"regexp"
+	"strings"
+	"time"
 )
 
-// Tag is an article tag: a name plus a domain-generated UUID identifier.
-//
-// Two tags are considered equal when their names match; the ID is ignored
-// (mirrors Lombok's @EqualsAndHashCode(of = "name") in the source).
-//
-// The zero value (Tag{}) is the equivalent of the source's no-args
-// constructor and is what sqlx / encoding/json populate when scanning or
-// decoding. Fields are exported so they serve directly as the accessors and
-// mutators Lombok's @Data generated.
+// Tag is a label attached to an article. Two tags are the same when their
+// names match, regardless of their IDs, as with the source's Tag
+// (@EqualsAndHashCode(of = "name")).
 type Tag struct {
-	ID   string `db:"id" json:"id"`
-	Name string `db:"name" json:"name"`
+	ID   string
+	Name string
 }
 
-// NewTag returns a Tag with the given name and a freshly generated random
-// (version 4) UUID string as its ID.
-func NewTag(name string) *Tag {
-	return &Tag{
-		ID:   newRandomUUID(),
-		Name: name,
-	}
+// NewTag returns a Tag with the given name and a new random UUID ID.
+func NewTag(name string) Tag {
+	return Tag{ID: newRandomUUIDForCore(), Name: name}
 }
 
-// Equal reports whether t and other represent the same tag. Equality is
-// based solely on Name; ID is ignored. Two nil tags are equal; a nil and a
-// non-nil tag are not.
-func (t *Tag) Equal(other *Tag) bool {
-	if t == nil || other == nil {
-		return t == other
-	}
+// Equal reports whether t and other have the same name, matching the
+// source's name-based equality.
+func (t Tag) Equal(other Tag) bool {
 	return t.Name == other.Name
 }
 
-// Key returns the value that identifies the tag for hashing purposes (for
-// example as a map key or set member). It is consistent with Equal: it
-// depends only on Name.
-func (t *Tag) Key() string {
-	if t == nil {
-		return ""
-	}
+// Key returns the value that identifies a tag (its name). Use it as a map key
+// to deduplicate tags.
+func (t Tag) Key() string {
 	return t.Name
 }
 
-// String returns a human-readable representation including both id and
-// name, matching the shape of Lombok's generated toString.
-func (t *Tag) String() string {
-	if t == nil {
-		return "Tag(<nil>)"
-	}
-	return fmt.Sprintf("Tag(id=%s, name=%s)", t.ID, t.Name)
+// String returns the tag name.
+func (t Tag) String() string {
+	return t.Name
 }
 
-// newRandomUUID generates an RFC 4122 version 4 UUID in its canonical
-// 36-character string form, equivalent to Java's UUID.randomUUID().toString().
-func newRandomUUID() string {
+// Article is the aggregate root for a blog article.
+//
+// Fields are exported so the persistence layer can hydrate the struct. The
+// source achieved the same with Lombok @Getter, @NoArgsConstructor and
+// reflection. Domain code should change an article only through Update, so
+// the slug and UpdatedAt stay consistent.
+type Article struct {
+	UserID      string
+	ID          string
+	Slug        string
+	Title       string
+	Description string
+	Body        string
+	Tags        []Tag
+	CreatedAt   time.Time
+	UpdatedAt   time.Time
+}
+
+// NewArticle creates an article with a new random UUID ID. The slug is
+// derived from title, and duplicate tag names are removed. A nil tagList
+// gives an empty tag list.
+//
+// createdAt sets both CreatedAt and UpdatedAt. If createdAt is the zero time,
+// the current time is used. This covers both source constructors: the 5-arg
+// one that defaulted to new DateTime() and the 6-arg one that took createdAt.
+func NewArticle(title, description, body string, tagList []string, userID string, createdAt time.Time) *Article {
+	if createdAt.IsZero() {
+		createdAt = time.Now()
+	}
+	return &Article{
+		UserID:      userID,
+		ID:          newRandomUUIDForCore(),
+		Slug:        ToSlug(title),
+		Title:       title,
+		Description: description,
+		Body:        body,
+		Tags:        dedupeTags(tagList),
+		CreatedAt:   createdAt,
+		UpdatedAt:   createdAt,
+	}
+}
+
+// Update changes the title, description and body. Empty values are ignored.
+// Changing the title also recomputes the slug. Any applied change sets
+// UpdatedAt to the current time, in memory only.
+func (a *Article) Update(title, description, body string) {
+	if title != "" {
+		a.Title = title
+		a.Slug = ToSlug(title)
+		a.UpdatedAt = time.Now()
+	}
+	if description != "" {
+		a.Description = description
+		a.UpdatedAt = time.Now()
+	}
+	if body != "" {
+		a.Body = body
+		a.UpdatedAt = time.Now()
+	}
+}
+
+// Equal reports whether a and other are the same article, compared by ID
+// only (source: @EqualsAndHashCode(of = {"id"})). Two nil articles are equal.
+func (a *Article) Equal(other *Article) bool {
+	if a == nil || other == nil {
+		return a == other
+	}
+	return a.ID == other.ID
+}
+
+// slugSeparators matches runs of the characters the source's slug regex
+// replaced: '&', '|', U+FE30–U+FFA0, '’', '”', whitespace, '?', ',' and '.'.
+//
+// MIGRATION_NOTE: Java's \s matches [ \t\n\x0B\f\r], but Go's RE2 \s does not
+// include \x0B (vertical tab). \x0B is added explicitly to keep the behavior
+// the same.
+var slugSeparators = regexp.MustCompile(`[&|\x{FE30}-\x{FFA0}’”\s\x0B?,.]+`)
+
+// ToSlug lowercases title and replaces each run of separator characters with
+// a single '-'.
+//
+// MIGRATION_NOTE: Java's String.toLowerCase() depends on the locale, while
+// strings.ToLower uses Unicode case mapping. Results can differ only for
+// locale-specific cases such as the Turkish dotted I.
+func ToSlug(title string) string {
+	return slugSeparators.ReplaceAllString(strings.ToLower(title), "-")
+}
+
+// dedupeTags turns tag names into Tags and removes duplicate names, keeping
+// the first occurrence of each.
+//
+// MIGRATION_NOTE: The source used a HashSet, so its tag order was
+// unspecified. Keeping input order is deterministic and still satisfies the
+// source's behavior.
+func dedupeTags(names []string) []Tag {
+	tags := make([]Tag, 0, len(names))
+	seen := make(map[string]struct{}, len(names))
+	for _, name := range names {
+		if _, ok := seen[name]; ok {
+			continue
+		}
+		seen[name] = struct{}{}
+		tags = append(tags, NewTag(name))
+	}
+	return tags
+}
+
+// newRandomUUIDForCore returns a random RFC 4122 version 4 UUID string, like
+// Java's UUID.randomUUID().toString().
+//
+// MIGRATION_NOTE: No UUID library is in go.mod, so the UUID is built from
+// crypto/rand. On the very rare chance that crypto/rand fails, math/rand/v2
+// is used instead. These are identifiers, not secrets, so this avoids a panic
+// and avoids changing the constructor signatures that callers already use.
+// Review this if IDs ever need to be unguessable.
+func newRandomUUIDForCore() string {
 	var b [16]byte
 	if _, err := rand.Read(b[:]); err != nil {
-		// MIGRATION_NOTE: crypto/rand failing means the OS entropy source is
-		// broken; since Go 1.24 rand.Read itself crashes the process in this
-		// case and never returns an error. Treating it as unrecoverable keeps
-		// NewTag's single-value signature, matching the source constructor.
-		panic(fmt.Sprintf("core: crypto/rand unavailable: %v", err))
+		for i := range b {
+			b[i] = byte(mrand.Uint32())
+		}
 	}
 	b[6] = (b[6] & 0x0f) | 0x40 // version 4
 	b[8] = (b[8] & 0x3f) | 0x80 // RFC 4122 variant
-	return fmt.Sprintf("%x-%x-%x-%x-%x", b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+
+	var out [36]byte
+	hex.Encode(out[0:8], b[0:4])
+	out[8] = '-'
+	hex.Encode(out[9:13], b[4:6])
+	out[13] = '-'
+	hex.Encode(out[14:18], b[6:8])
+	out[18] = '-'
+	hex.Encode(out[19:23], b[8:10])
+	out[23] = '-'
+	hex.Encode(out[24:36], b[10:16])
+	return string(out[:])
 }
