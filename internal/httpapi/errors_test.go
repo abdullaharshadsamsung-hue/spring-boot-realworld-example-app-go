@@ -6,187 +6,187 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
+	"reflect"
 	"testing"
+	"time"
 )
 
-// NOTE: errors.go calls WriteError(w, err) and WriteAuthzError(w, err), but
-// no_authorization.go declares WriteAuthzError(w, r, err) and calls
-// WriteError(w, r, err). The package will not compile until those signatures
-// agree. These tests use the signatures declared in errors.go. They avoid
-// asserting on the details of the ErrNoAuthorization path.
+type customFieldErr struct{ f map[string][]string }
 
-func TestErrInvalidAuthentication_Message(t *testing.T) {
+func (c customFieldErr) Error() string                    { return "custom" }
+func (c customFieldErr) FieldErrors() map[string][]string { return c.f }
+
+func TestNewInvalidRequestError(t *testing.T) {
 	tests := []struct {
 		name string
-		err  error
+		in   FieldErrors
+		want FieldErrors
 	}{
-		{"sentinel", ErrInvalidAuthentication},
-		{"constant", errors.New(invalidAuthenticationMessage)},
+		{"with errors", FieldErrors{"email": {"duplicated email"}}, FieldErrors{"email": {"duplicated email"}}},
+		{"empty", FieldErrors{}, FieldErrors{}},
+		{"nil", nil, FieldErrors{}},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			msg := tc.err.Error()
-			if msg != "invalid email or password" {
-				t.Fatalf("message = %q", msg)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			e := NewInvalidRequestError(tt.in)
+			if e.Error() != "" {
+				t.Errorf("Error() = %q, want empty", e.Error())
 			}
-			if msg != strings.ToLower(msg) {
-				t.Errorf("message not lowercase: %q", msg)
+			if e.Errors() == nil {
+				t.Fatal("Errors() returned nil")
 			}
-			if strings.HasSuffix(msg, ".") || strings.HasSuffix(msg, "!") {
-				t.Errorf("message has trailing punctuation: %q", msg)
+			if !reflect.DeepEqual(e.Errors(), tt.want) {
+				t.Errorf("Errors() = %v, want %v", e.Errors(), tt.want)
+			}
+			if errors.Unwrap(e) != nil {
+				t.Error("expected no cause")
+			}
+			if tt.in != nil {
+				// same reference: mutation visible
+				tt.in.Add("x", "y")
+				if len(e.Errors()["x"]) != 1 {
+					t.Error("Errors() not same reference as input")
+				}
+			}
+			a, b := e.Errors(), e.Errors()
+			if reflect.ValueOf(a).Pointer() != reflect.ValueOf(b).Pointer() {
+				t.Error("Errors() returns different references")
+			}
+			if reflect.ValueOf(e.FieldErrors()).Pointer() != reflect.ValueOf(a).Pointer() {
+				t.Error("FieldErrors() differs from Errors()")
 			}
 		})
 	}
 }
 
-func TestInvalidAuthenticationBody_NonMatching(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-	}{
-		{"not found", ErrResourceNotFound},
-		{"other", errors.New("boom")},
-		{"same text but different value", errors.New("invalid email or password")},
+func TestFieldErrors(t *testing.T) {
+	f := FieldErrors{}
+	if f.HasErrors() {
+		t.Error("empty should have no errors")
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			if body, ok := invalidAuthenticationBody(tc.err); ok || body != nil {
-				t.Fatalf("expected no match, got %v", body)
-			}
-		})
+	f.Add("name", "a")
+	f.Add("name", "b")
+	if !f.HasErrors() {
+		t.Error("expected errors")
+	}
+	if !reflect.DeepEqual(f["name"], []string{"a", "b"}) {
+		t.Errorf("got %v", f["name"])
 	}
 }
 
 func TestWriteError(t *testing.T) {
+	fixed := time.Date(2024, 1, 2, 3, 4, 5, 6000000, time.UTC)
+	old := now
+	now = func() time.Time { return fixed }
+	defer func() { now = old }()
+
 	tests := []struct {
-		name        string
-		err         error
-		wantStatus  int
-		wantMessage string
-		wantEmpty   bool
-		forbidden   []string
+		name   string
+		err    error
+		status int
+		check  func(t *testing.T, body []byte)
 	}{
-		{
-			name:        "invalid auth",
-			err:         ErrInvalidAuthentication,
-			wantStatus:  http.StatusUnprocessableEntity,
-			wantMessage: "invalid email or password",
-		},
-		{
-			name:        "wrapped invalid auth does not leak the email",
-			err:         fmt.Errorf("login secret@x.com wrong password: %w", ErrInvalidAuthentication),
-			wantStatus:  http.StatusUnprocessableEntity,
-			wantMessage: "invalid email or password",
-			forbidden:   []string{"secret@x.com", "wrong password"},
-		},
-		{
-			name:       "not found",
-			err:        ErrResourceNotFound,
-			wantStatus: http.StatusNotFound,
-			wantEmpty:  true,
-		},
-		{
-			name:       "wrapped not found",
-			err:        fmt.Errorf("article x: %w", ErrResourceNotFound),
-			wantStatus: http.StatusNotFound,
-			wantEmpty:  true,
-		},
-		{
-			name:        "unknown error is generic 500",
-			err:         errors.New("db password=hunter2"),
-			wantStatus:  http.StatusInternalServerError,
-			wantMessage: http.StatusText(http.StatusInternalServerError),
-			forbidden:   []string{"hunter2"},
-		},
+		{"invalid request", NewInvalidRequestError(FieldErrors{"username": {"duplicated username"}}), 422,
+			func(t *testing.T, b []byte) {
+				var v struct{ Errors map[string][]string }
+				json.Unmarshal(b, &v)
+				if !reflect.DeepEqual(v.Errors, map[string][]string{"username": {"duplicated username"}}) {
+					t.Errorf("body %s", b)
+				}
+			}},
+		{"invalid request nil", NewInvalidRequestError(nil), 422,
+			func(t *testing.T, b []byte) {
+				var v map[string]map[string][]string
+				json.Unmarshal(b, &v)
+				if v["errors"] == nil {
+					t.Errorf("body %s", b)
+				}
+			}},
+		{"wrapped invalid request", fmt.Errorf("w: %w", NewInvalidRequestError(FieldErrors{"a": {"b"}})), 422, nil},
+		{"custom fielderrorer nil", customFieldErr{}, 422,
+			func(t *testing.T, b []byte) {
+				var v map[string]map[string][]string
+				json.Unmarshal(b, &v)
+				if v["errors"] == nil {
+					t.Errorf("body %s", b)
+				}
+			}},
+		{"invalid auth", fmt.Errorf("login: %w", ErrInvalidAuthentication), 422,
+			func(t *testing.T, b []byte) {
+				var v messageBody
+				json.Unmarshal(b, &v)
+				if v.Message != "invalid email or password" {
+					t.Errorf("body %s", b)
+				}
+			}},
+		{"not found", ErrResourceNotFound, 404,
+			func(t *testing.T, b []byte) {
+				var v ErrorBody
+				json.Unmarshal(b, &v)
+				if v.Status != 404 || v.Error != "Not Found" || v.Path != "/p" || v.Message != "resource not found" ||
+					v.Timestamp != fixed.Format(timestampLayout) {
+					t.Errorf("body %+v", v)
+				}
+			}},
+		{"internal", errors.New("secret db"), 500,
+			func(t *testing.T, b []byte) {
+				var v ErrorBody
+				json.Unmarshal(b, &v)
+				if v.Message != "Internal Server Error" {
+					t.Errorf("leaked: %+v", v)
+				}
+			}},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			WriteError(rec, tc.err)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			WriteError(w, httptest.NewRequest(http.MethodGet, "/p", nil), tt.err)
+			if w.Code != tt.status {
+				t.Errorf("status %d want %d", w.Code, tt.status)
 			}
-			raw := rec.Body.String()
-			if tc.wantEmpty {
-				if raw != "" {
-					t.Fatalf("expected empty body, got %q", raw)
-				}
-				return
+			if ct := w.Header().Get("Content-Type"); ct != "application/json" {
+				t.Errorf("content-type %q", ct)
 			}
-			if ct := rec.Header().Get("Content-Type"); ct != "application/json" {
-				t.Errorf("content-type = %q", ct)
-			}
-			var body map[string]string
-			if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
-				t.Fatalf("decode: %v (%q)", err, raw)
-			}
-			if body["message"] != tc.wantMessage {
-				t.Errorf("message = %q, want %q", body["message"], tc.wantMessage)
-			}
-			for _, f := range tc.forbidden {
-				if strings.Contains(raw, f) {
-					t.Errorf("body leaks %q: %s", f, raw)
-				}
+			if tt.check != nil {
+				tt.check(t, w.Body.Bytes())
 			}
 		})
+	}
+}
+
+func TestWriteErrorNilAndNilRequest(t *testing.T) {
+	w := httptest.NewRecorder()
+	WriteError(w, nil, nil)
+	if w.Body.Len() != 0 {
+		t.Error("nil err should write nothing")
+	}
+	w = httptest.NewRecorder()
+	WriteError(w, nil, ErrResourceNotFound)
+	var v ErrorBody
+	json.Unmarshal(w.Body.Bytes(), &v)
+	if w.Code != 404 || v.Path != "" {
+		t.Errorf("got %d %+v", w.Code, v)
 	}
 }
 
 func TestErrorHandlerFunc(t *testing.T) {
 	tests := []struct {
-		name       string
-		h          ErrorHandlerFunc
-		wantStatus int
-		wantBody   string
+		name   string
+		h      ErrorHandlerFunc
+		status int
 	}{
-		{
-			name: "success passes through",
-			h: func(w http.ResponseWriter, r *http.Request) error {
-				w.WriteHeader(http.StatusCreated)
-				_, _ = w.Write([]byte("ok"))
-				return nil
-			},
-			wantStatus: http.StatusCreated,
-			wantBody:   "ok",
-		},
-		{
-			name: "invalid auth",
-			h: func(w http.ResponseWriter, r *http.Request) error {
-				return fmt.Errorf("login: %w", ErrInvalidAuthentication)
-			},
-			wantStatus: http.StatusUnprocessableEntity,
-			wantBody:   `"message":"invalid email or password"`,
-		},
-		{
-			name: "not found",
-			h: func(w http.ResponseWriter, r *http.Request) error {
-				return ErrResourceNotFound
-			},
-			wantStatus: http.StatusNotFound,
-		},
-		{
-			name: "unknown",
-			h: func(w http.ResponseWriter, r *http.Request) error {
-				return errors.New("internal detail")
-			},
-			wantStatus: http.StatusInternalServerError,
-			wantBody:   http.StatusText(http.StatusInternalServerError),
-		},
+		{"ok", func(w http.ResponseWriter, r *http.Request) error { w.WriteHeader(204); return nil }, 204},
+		{"validation", func(w http.ResponseWriter, r *http.Request) error {
+			return NewInvalidRequestError(FieldErrors{"title": {"can't be empty"}})
+		}, 422},
+		{"not found", func(w http.ResponseWriter, r *http.Request) error { return ErrResourceNotFound }, 404},
 	}
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rec := httptest.NewRecorder()
-			req := httptest.NewRequest(http.MethodPost, "/api/users/login", nil)
-			tc.h.ServeHTTP(rec, req)
-			if rec.Code != tc.wantStatus {
-				t.Fatalf("status = %d, want %d", rec.Code, tc.wantStatus)
-			}
-			if !strings.Contains(rec.Body.String(), tc.wantBody) {
-				t.Errorf("body %q missing %q", rec.Body.String(), tc.wantBody)
-			}
-			if strings.Contains(rec.Body.String(), "internal detail") {
-				t.Error("internal detail leaked")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			w := httptest.NewRecorder()
+			tt.h.ServeHTTP(w, httptest.NewRequest(http.MethodPost, "/x", nil))
+			if w.Code != tt.status {
+				t.Errorf("status %d want %d", w.Code, tt.status)
 			}
 		})
 	}
