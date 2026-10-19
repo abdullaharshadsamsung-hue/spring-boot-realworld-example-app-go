@@ -1,5 +1,10 @@
 package app
 
+import (
+	"fmt"
+	"time"
+)
+
 // Direction is the paging direction requested by a cursor query.
 //
 // It replaces the source's nested CursorPager.Direction enum.
@@ -124,4 +129,117 @@ func cursorOf[T Node](item T) (string, bool) {
 		return "", false
 	}
 	return item.Cursor(), true
+}
+
+const (
+	// DefaultCursorPageLimit is the page size used when no positive limit is
+	// supplied.
+	DefaultCursorPageLimit = 20
+	// MaxCursorPageLimit is the largest page size a caller may request;
+	// larger values are clamped to it.
+	MaxCursorPageLimit = 1000
+)
+
+// CursorPageParameter is the cursor (keyset) pagination input passed from
+// the API layers to the read queries. It replaces the source's generic
+// CursorPageParameter<T>; every source caller used a DateTime cursor, so the
+// cursor is a *time.Time here (nil means "start from the beginning").
+//
+// limit and cursor are unexported and can only be set through
+// NewCursorPageParameter, mirroring the source's private setters. Direction
+// may be changed with SetDirection.
+//
+// The zero value is the source's no-args instance: limit 20, nil cursor and
+// no NEXT direction (IsNext reports false).
+type CursorPageParameter struct {
+	limit     int // 0 means DefaultCursorPageLimit, so the zero value is usable
+	cursor    *time.Time
+	direction Direction
+}
+
+// NewDefaultCursorPageParameter returns a parameter with default values:
+// limit 20, nil cursor and the zero direction.
+func NewDefaultCursorPageParameter() CursorPageParameter {
+	return CursorPageParameter{limit: DefaultCursorPageLimit}
+}
+
+// NewCursorPageParameter builds a pagination parameter. A limit above
+// MaxCursorPageLimit is capped at MaxCursorPageLimit; a non-positive limit is
+// ignored and the default of 20 is kept.
+func NewCursorPageParameter(cursor *time.Time, limit int, direction Direction) CursorPageParameter {
+	p := NewDefaultCursorPageParameter()
+	p.setLimit(limit)
+	p.cursor = cursor
+	p.direction = direction
+	return p
+}
+
+func (p *CursorPageParameter) setLimit(limit int) {
+	switch {
+	case limit > MaxCursorPageLimit:
+		p.limit = MaxCursorPageLimit
+	case limit > 0:
+		p.limit = limit
+	}
+}
+
+// Limit returns the page size, always within 1..MaxCursorPageLimit.
+func (p CursorPageParameter) Limit() int {
+	if p.limit <= 0 {
+		return DefaultCursorPageLimit
+	}
+	return p.limit
+}
+
+// Cursor returns the cursor position, or nil when paging from the start.
+func (p CursorPageParameter) Cursor() *time.Time {
+	return p.cursor
+}
+
+// Direction returns the requested paging direction.
+func (p CursorPageParameter) Direction() Direction {
+	return p.direction
+}
+
+// SetDirection changes the requested paging direction.
+func (p *CursorPageParameter) SetDirection(direction Direction) {
+	p.direction = direction
+}
+
+// IsNext reports whether the direction is DirectionNext.
+func (p CursorPageParameter) IsNext() bool {
+	return p.direction == DirectionNext
+}
+
+// QueryLimit returns Limit()+1. Queries fetch one extra row so the caller
+// can tell whether another page exists.
+func (p CursorPageParameter) QueryLimit() int {
+	return p.Limit() + 1
+}
+
+// Equal reports whether p and other have the same limit, cursor instant and
+// direction (the source's Lombok-generated equals). Cursors are compared by
+// instant, not by pointer identity.
+func (p CursorPageParameter) Equal(other CursorPageParameter) bool {
+	if p.Limit() != other.Limit() || p.direction != other.direction {
+		return false
+	}
+	switch {
+	case p.cursor == nil && other.cursor == nil:
+		return true
+	case p.cursor == nil || other.cursor == nil:
+		return false
+	default:
+		return p.cursor.Equal(*other.cursor)
+	}
+}
+
+// String returns a debug representation like the source's Lombok toString.
+func (p CursorPageParameter) String() string {
+	cursor := "null"
+	if p.cursor != nil {
+		cursor = p.cursor.String()
+	}
+	return fmt.Sprintf("CursorPageParameter(limit=%d, cursor=%s, direction=%s)",
+		p.Limit(), cursor, p.direction)
 }
