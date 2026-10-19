@@ -1,36 +1,47 @@
-# Spring Boot RealWorld: Go port
+# Spring Boot RealWorld (Go port)
 
-A Go implementation of the [RealWorld](https://github.com/gothinkster/realworld) "Conduit" backend API, migrated from the Spring Boot RealWorld example. The API covers users and authentication (JWT), profiles and follows, articles, favorites, comments and tags. Data is stored in PostgreSQL.
+This is a Go implementation of the [RealWorld](https://github.com/gothinkster/realworld) "Conduit" backend API, migrated from the Spring Boot RealWorld example application. It provides a REST API for:
 
-**Migration status:** 72 of 103 source modules were translated. The other 31 were intentionally not carried over, as agreed in the migration plan (see [Known limitations](#known-limitations)). The migration tool self-assessed its confidence at 95%. That figure is an estimate, not a measured result.
+- user registration and login
+- profiles and follows
+- articles, including feed, favorites and tags
+- comments
 
-**Verified so far:**
+Authentication uses JWT, and data is stored in PostgreSQL.
 
-| Check | Result |
+**Migration status**
+
+| Item | Status |
 |---|---|
-| Build (`go build ./cmd/server`) | passed |
-| Unit tests (`go test ./...`) | passed |
-| Requests against the running Go server (the requests listed in [First requests](#first-requests-to-try)) | returned the expected status codes |
+| Modules migrated | 72 of 103 |
+| Modules not translated | The other 31 were intentionally not translated, per the agreed plan. See [Known limitations](#known-limitations). |
+| Build | passed |
+| Target unit tests (`go test ./...`) | passed |
+| Behaviour comparison against the original | passed for the requests listed under [First requests to try](#first-requests-to-try) |
+| Model self-assessed confidence | 95%. This figure was not measured. |
 
 ---
 
 ## Tech stack
 
-- **Language:** Go. `go.mod` declares `go 1.23`, and the project was built and tested with the `golang:1.27-alpine` toolchain.
-- **HTTP routing:** [`github.com/go-chi/chi/v5`](https://github.com/go-chi/chi) for the outer router and middleware, and the standard library `net/http` `ServeMux` for API handlers.
-- **Database:** PostgreSQL through `database/sql` and [`github.com/lib/pq`](https://github.com/lib/pq).
-- **Configuration:** [`github.com/spf13/viper`](https://github.com/spf13/viper), which reads environment variables only.
-- **Logging:** [`github.com/rs/zerolog`](https://github.com/rs/zerolog).
-- **Auth:** JWT, implemented in `internal/auth/jwt.go`.
-- **Container:** `Dockerfile` and `docker-compose.yml`, which run the app plus `postgres:16-alpine`.
+| Concern | Choice |
+|---|---|
+| Language | Go. `go.mod` declares `go 1.23`, and the project was built with the `golang:1.27-alpine` toolchain. |
+| HTTP | `net/http` and [`go-chi/chi/v5`](https://github.com/go-chi/chi) v5.1.0, with chi's `Logger` and `Recoverer` middleware |
+| Database driver | [`lib/pq`](https://github.com/lib/pq) v1.10.9 through `database/sql` |
+| Database | PostgreSQL. `docker-compose.yml` uses `postgres:16-alpine`. |
+| Configuration | [`spf13/viper`](https://github.com/spf13/viper) v1.19.0, which reads environment variables |
+| Logging | [`rs/zerolog`](https://github.com/rs/zerolog) v1.33.0 |
+| Module name | `migrated-app` |
+
+---
 
 ## Prerequisites
 
-- Go toolchain 1.27, the same version as the `golang:1.27-alpine` image used for the verified build.
-- `git` and a C build toolchain. The Alpine build installs both through `build-base`. On other systems, install your distribution's equivalent (`gcc`, `make`, …).
-- A reachable PostgreSQL server. The compose setup uses PostgreSQL 16.
-- `psql`, if you apply the schema the way shown below.
-- Optional: Docker with the Compose plugin, for the containerised setup.
+- **Go 1.27.** This matches the `golang:1.27-alpine` image the project was built and tested with. `go.mod` requires at least 1.23.
+- **git.** It is needed by `go mod download`.
+- **PostgreSQL**, reachable from your machine. Version 16 is what `docker-compose.yml` uses. If you do not have one, step 3 below shows how to start one with Docker.
+- *(Optional)* **Docker with Docker Compose**, for the containerised setup or for running PostgreSQL locally.
 
 ---
 
@@ -38,26 +49,29 @@ A Go implementation of the [RealWorld](https://github.com/gothinkster/realworld)
 
 | | Database |
 |---|---|
-| **Original (Spring)** | SQLite (a local database file, empty username/password), accessed through MyBatis |
-| **Migrated (Go)** | PostgreSQL only, accessed through `database/sql` and `lib/pq` |
+| Original (Spring) | SQLite. It used a local SQLite database file with an empty username and password. |
+| This project | PostgreSQL only, using the `lib/pq` driver and `$n` placeholders. |
 
-**Why it changed:** the migrated project targets PostgreSQL, so the SQLite file path was replaced by a PostgreSQL DSN (`DATABASE_URL`). This is recorded as a `MIGRATION_NOTE` in `internal/config/config.go`. The queries use PostgreSQL-specific features, such as `$n` placeholders and `= ANY($1)` with array parameters, so SQLite is no longer supported.
+**Why the database changed:** the migrated project targets PostgreSQL. As a result, the SQLite file path became a PostgreSQL DSN in `DATABASE_URL`, and the Gradle task that deleted the SQLite database file no longer applies.
 
-**Schema:** the table definitions are in `src/main/resources/db/migration/V1__create_tables.sql`. The file creates these tables: `users`, `articles`, `article_favorites`, `follows`, `tags`, `article_tags` and `comments`.
+**How the schema is created**
 
-**Schema caveats:**
+- No separate migration step is needed. On startup, `store.EnsureSchema` in `internal/store/schema.go` runs idempotent `CREATE TABLE IF NOT EXISTS` statements for all tables: `users`, `articles`, `article_favorites`, `follows`, `tags`, `article_tags` and `comments`.
+- These statements mirror `src/main/resources/db/migration/V1__create_tables.sql`. That file is kept for reference only. Nothing in the Go code executes it, and no migration tool (Flyway or similar) is used.
+- You only need an existing, empty PostgreSQL database and a user that can create tables in it.
 
-- The server does not run migrations in `cmd/server/main.go` or `cmd/server/router.go`.
-- `docker-compose.yml` does not mount the schema into the Postgres container.
-- At startup the server only pings the database. If the ping fails, it logs a warning and keeps running.
+**Startup behaviour when the database is unavailable**
+
+- If the initial database ping fails, the server logs a warning and keeps going.
+- If schema creation then fails, startup aborts.
 
 ---
 
 ## Getting started
 
-Run all commands from the root of a fresh clone.
-
 ### 1. Install dependencies and build
+
+Run these from the repository root:
 
 ```sh
 go mod download
@@ -65,87 +79,89 @@ go mod tidy
 go build -o bin/server ./cmd/server
 ```
 
-This produces the binary `bin/server`. `go mod tidy` was part of the verified build. It may rewrite `go.mod`/`go.sum` if they are out of date.
+`go mod tidy` is part of the build sequence that was verified. It may rewrite `go.mod` and `go.sum`, so check `git diff` afterwards.
 
 ### 2. Configure the environment
 
-`DATABASE_URL` is required. Without it, the server exits at startup with `config: DATABASE_URL must be set`. The value below matches the credentials used in `docker-compose.yml`. Adjust the host, port and credentials to your PostgreSQL server.
+`DATABASE_URL` is required. The example below uses the same credentials as `docker-compose.yml` and matches the PostgreSQL container started in step 3; if you use your own PostgreSQL server, change the host, user, password and database name in the DSN accordingly.
 
 ```sh
 export DATABASE_URL="postgres://app:app@localhost:5432/app?sslmode=disable"
-export JWT_SECRET="change-me"
+export JWT_SECRET="change-me-to-a-long-random-secret"
 export PORT=8080
 ```
 
-See [Environment variables](#environment-variables) for all options. Note that `PORT` currently has no effect on the listen address.
+Notes on these variables:
+
+- **`JWT_SECRET`:** if you leave it unset, the secret that was committed in the original project is used. Always set your own value outside local development.
+- **`PORT`:** it is parsed but does not change the listen port. See [Known limitations](#known-limitations).
+
+All supported variables are listed under [Environment variables](#environment-variables).
 
 ### 3. Set up the database
 
-The migration run recorded no database setup command. Create the tables from the bundled schema before the first start. This `psql` invocation is a suggestion and was not part of the recorded run:
+You need a running PostgreSQL database. If you do not already have one, start one with Docker using the same user, password and database as `docker-compose.yml` (published on `localhost:5432`, matching the `DATABASE_URL` above):
 
 ```sh
-psql "$DATABASE_URL" -f src/main/resources/db/migration/V1__create_tables.sql
+docker run -d --name conduit-postgres \
+  -e POSTGRES_USER=app -e POSTGRES_PASSWORD=app -e POSTGRES_DB=app \
+  -p 5432:5432 postgres:16-alpine
 ```
 
-### 4. Run
+No schema commands are required. The tables are created automatically when the server starts (see [Database](#database)).
+
+### 4. Run the server
 
 ```sh
 ./bin/server
 ```
 
-The server listens on **port 8080** (`http://localhost:8080`). Press Ctrl+C or send SIGTERM to stop it. Shutdown is graceful, with a 10-second timeout.
-
-Health check (unauthenticated):
-
-```sh
-curl http://localhost:8080/healthz
-# ok
-```
+The server listens on **http://localhost:8080**. Stop it with `Ctrl+C` or `SIGTERM`; the server then shuts down gracefully, allowing up to 10 seconds.
 
 ### First requests to try
 
-The following requests were sent to the running Go server and returned these status codes:
+The following requests were verified to return the same status as the original application:
 
-| Request | Status |
-|---|---|
-| `GET /articles/feed` | 200 |
-| `GET /articles` | 200 |
-| `GET /user` | 200 |
-| `GET /tags` | 200 |
-| `GET /articles/1` | 404 |
-| `GET /articles/1/comments` | 404 |
-| `GET /profiles/1` | 404 |
-| `POST /users` | 201 |
+```
+GET  /articles            -> 200
+GET  /tags                -> 200
+GET  /articles/feed       -> 200
+GET  /user                -> 200
+GET  /articles/how-to-train-your-dragon           -> 200
+GET  /articles/how-to-train-your-dragon/comments  -> 200
+POST /users               -> 201
+POST /articles            -> 200
+```
 
-For example:
+The two GET requests on `how-to-train-your-dragon` only succeed after an article with that slug exists.
+
+To start with something that needs no data or authentication:
 
 ```sh
-curl -i http://localhost:8080/tags
-curl -i http://localhost:8080/articles
+curl http://localhost:8080/tags
+curl http://localhost:8080/articles
+```
+
+There is also a liveness endpoint that returns `ok` and needs no authentication:
+
+```sh
+curl http://localhost:8080/healthz
 ```
 
 ### Alternative: Docker Compose
+
+`docker-compose.yml` starts two services:
+
+- **`postgres`** (`postgres:16-alpine`). It has the user, password and database all set to `app` and a health check. Its port 5432 is exposed only to the compose network, not published to the host.
+- **`app`**, built from the `Dockerfile`. It starts once Postgres is healthy and publishes port `8080`.
 
 ```sh
 docker compose up --build
 ```
 
-This builds the image from `Dockerfile` and starts two services:
+The API is then available at http://localhost:8080.
 
-- **`app`:** published on `localhost:8080`, configured with `DATABASE_URL=postgres://app:app@postgres:5432/app?sslmode=disable` and `JWT_SECRET=test-secret-key-for-ci`.
-- **`postgres`:** `postgres:16-alpine`, with user, password and database all set to `app`, and data in the `postgres-data` volume. The app waits for its health check to pass.
-
-Notes on the compose setup:
-
-- Port 5432 is only `expose`d, not published to the host. A `bin/server` running on the host therefore cannot reach the compose database unless you add a `ports:` mapping.
-- The schema is not applied automatically. Apply it to the compose database yourself once the services are up (not part of the recorded run):
-
-  ```sh
-  docker compose exec -T postgres psql -U app -d app < src/main/resources/db/migration/V1__create_tables.sql
-  ```
-
-- Compose also sets `DB_HOST`, `DB_NAME`, `DB_PASSWORD`, `DB_PORT`, `DB_USER`, `DB_USERNAME` and `POSTGRES_URL`. `internal/config/config.go` reads none of them; only `DATABASE_URL` is used.
-- `JWT_SECRET` in the compose file is a test value. Do not use it in production.
+The compose file sets `JWT_SECRET` to `test-secret-key-for-ci`, which is suitable for local or CI use only.
 
 ---
 
@@ -155,181 +171,150 @@ Notes on the compose setup:
 go test ./...
 ```
 
-This passed during migration. The run had a PostgreSQL server reachable as `postgres`. Whether any tests, for example in `internal/store`, need a live database is not documented. If tests fail with connection errors, provide a database.
+Test files sit next to the code they cover, under `internal/app`, `internal/auth`, `internal/config`, `internal/core`, `internal/graphql`, `internal/httpapi` and `internal/store`.
+
+The verified test run had a PostgreSQL database available; start it and export the variables from steps 2 and 3 before running the tests.
 
 ---
 
 ## Environment variables
 
-All variables are read by `internal/config/config.go`.
+These are read by `internal/config/config.go`.
 
 | Variable | Required | Default | Description |
 |---|---|---|---|
-| `DATABASE_URL` | **yes** | none | PostgreSQL DSN. Startup fails if it is missing or blank. |
-| `JWT_SECRET` | no (but override it) | A secret copied from the original `application.properties`, committed to source control | HMAC secret for signing and verifying JWTs. An empty value is rejected. **Always set this outside development.** |
-| `PORT` | no | `8080` | Parsed by `internal/config/config.go`, but **currently ignored**: `cmd/server/main.go` hard-codes `Addr: ":8080"`. |
+| `DATABASE_URL` | **yes** | none | PostgreSQL DSN. If it is missing or blank, startup fails. |
+| `JWT_SECRET` | no (but set it) | The secret committed in the original `application.properties` | HMAC secret used to sign and verify JWTs. It must not be empty. |
+| `PORT` | no | `8080` | Parsed and validated, but the listener in `cmd/server/main.go` is hard-coded to `:8080`. |
 | `JWT_SESSION_TIME` | no | `86400` | Token lifetime in seconds. Must be a positive integer. |
-| `IMAGE_DEFAULT` | no | `https://static.productionready.io/images/smiley-cyrus.jpg` | Avatar assigned to users who register without an image. |
-| `DB_STATEMENT_TIMEOUT` | no | `3000` | Per-statement database timeout in seconds. Must be a positive integer. See [Manual review](#manual-review-required). |
-| `SQL_LOG_LEVEL` | no | `debug` | zerolog level for the data-access layer (`trace`, `debug`, `info`, `warn`, `error`, …). Invalid values fail startup. |
+| `IMAGE_DEFAULT` | no | `https://static.productionready.io/images/smiley-cyrus.jpg` | Avatar URL assigned to users who register without an image. |
+| `DB_STATEMENT_TIMEOUT` | no | `3000` | Per-statement database timeout in seconds. Must be a positive integer. |
+| `SQL_LOG_LEVEL` | no | `debug` | zerolog level for the data-access layer, for example `debug`, `info`, `warn`, `error` or `trace`. Matching is case-insensitive. |
+
+`docker-compose.yml` also sets `DB_HOST`, `DB_NAME`, `DB_PASSWORD`, `DB_PORT`, `DB_USER`, `DB_USERNAME` and `POSTGRES_URL`. `internal/config` does not read any of these; only `DATABASE_URL` is used.
 
 ---
 
 ## Architecture overview
 
 ```
-cmd/server/
-  main.go          HTTP server on :8080, graceful shutdown on SIGINT/SIGTERM
-  router.go        chi router, middleware, /healthz, dependency wiring,
-                   read-side PostgreSQL adapters, password hasher
-internal/
-  config/          Environment-based configuration (replaces application.properties)
-  core/            Domain model: users, articles, comments, favorites, tokens,
-                   authorization rules (authz.go), domain errors
-  app/             Application services: article/comment/profile/tag/user queries,
-                   article commands, user service, validation, paging and
-                   date-time cursors, DTOs
-  auth/            JWT service (jwt.go) and request-context user (context.go)
-  httpapi/         REST handlers (users, current user, profiles, articles,
-                   article, favorites, comments, tags), security middleware,
-                   error rendering
-  graphql/         GraphQL resolvers and mutations (articles, comments, profiles,
-                   relations, tags, users) and GraphQL error mapping
-  store/           PostgreSQL write-side repositories (users, articles,
-                   comments, favorites) and a UTC time codec
-src/main/resources/
-  db/migration/V1__create_tables.sql   Database schema
-  schema/schema.graphqls               GraphQL schema carried over from the original
+cmd/server/          entry point and dependency wiring
+internal/config/     environment-based configuration (replaces application.properties)
+internal/core/       domain model: users, articles, comments, favorites, authorization rules, errors
+internal/app/        application services: queries, commands, DTOs, paging/cursors, validation
+internal/httpapi/    REST handlers, error mapping, security middleware
+internal/auth/       JWT service and request-context user helpers
+internal/store/      PostgreSQL repositories, schema bootstrap, time encoding
+internal/graphql/    GraphQL resolvers and mutations (not mounted, see Known limitations)
+src/main/resources/  original schema files kept for reference
 ```
 
-**Request flow:**
+### `cmd/server/main.go`
 
-1. The chi router applies the `Logger` and `Recoverer` middleware.
-2. `/healthz` is served directly.
-3. Every other path goes to an `http.ServeMux` holding all `internal/httpapi` handlers.
-4. That mux is wrapped in `httpapi.SecurityChain`, which runs CORS, then JWT authentication, then authorization rules.
+Creates an HTTP server on `:8080` and handles graceful shutdown on `SIGINT` or `SIGTERM`.
 
-**Read/write split:**
+### `cmd/server/router.go`
 
-- **Writes** go through the repositories in `internal/store`.
-- **Reads** go through small `database/sql` adapters defined in `cmd/server/router.go`: `userReads`, `relationReads`, `favoriteReads`, `articleReads`, `commentReads` and `tagReads`. These replace the original MyBatis read services and mapper XML.
-- **Application layer:** the services in `internal/app` sit between the handlers and these adapters.
+Builds the routing layer and wires every dependency by hand. There is no DI container. The steps are:
 
-**Pagination:** offset paging uses `LIMIT/OFFSET`. Cursor paging uses `updated_at` for articles and `created_at` for comments.
+1. Builds a chi router with logging and recovery middleware, and mounts `GET /healthz`.
+2. Loads configuration, opens the database, and runs `store.EnsureSchema`.
+3. Constructs the parts of the dependency graph:
+   - the JWT service
+   - the password hasher
+   - the write-side repositories from `internal/store`
+   - the read-side PostgreSQL adapters (`userReads`, `articleReads`, `commentReads`, `favoriteReads`, `relationReads`, `tagReads`), which are defined in this file
+   - the `internal/app` services
+4. Registers the `internal/httpapi` handlers (tags, users, current user, profiles, articles, single article, favorites, comments) on a `net/http` `ServeMux`.
+5. Wraps that mux in `httpapi.SecurityChain`, which applies CORS, then JWT authentication, then the authorization rules. The wrapped mux handles every path except `/healthz`.
+
+### `internal/store`
+
+Contains the write-side repositories (users, articles, comments, favorites). They port the SQL that previously lived in the MyBatis mapper XML files. `timecodec.go` handles timestamp encoding, including cursor values.
+
+### `internal/app`
+
+Mirrors the Spring `application` layer. It contains:
+
+- query services (articles, comments, profiles, tags, users)
+- `ArticleCommandService` and `UserService`
+- offset paging (`page.go`, `paging.go`) and date-time cursor paging (`datetime_cursor.go`)
+- validation (`validate_article.go`, `validate_user.go`, `register_validation.go`)
 
 ---
 
 ## Migration notes
 
-These are the changes from the original Spring codebase, with the reason for each.
-
 ### Behaviour changes
 
-1. **Password updates are hashed.**
-   - **Change:** a password changed through `PUT /user` or the GraphQL `updateUser` mutation is now stored hashed.
-   - **Reason:** the original stored the new password in plain text, so that user could never log in again (Quirk Q1). This is the one deliberate behaviour fix, and the plan says it should be confirmed with the project owner.
-2. **Personal feed pagination is fixed.**
-   - **Change:** the feed, in both its offset and cursor variants, now paginates by article ID first and loads tags afterwards. The response shape is unchanged.
-   - **Reason:** the original applied `LIMIT` to joined tag rows. This cut pages short and truncated tag lists (Quirk Q4).
-3. **GraphQL comment pagination uses a limit.**
-   - **Change:** `Article.comments` now applies `LIMIT limit+1`.
-   - **Reason:** the original comment cursor query had no `LIMIT`. It could return the wrong number of rows and wrong `hasNext`/`hasPrevious` values (Quirk Q5).
-4. **Articles without `tagList` succeed.**
-   - **Change:** creating an article with no `tagList`, through REST or GraphQL, succeeds with an empty tag list.
-   - **Reason:** the Java code threw a `NullPointerException` on a null `tagList`, which produced HTTP 500 (Quirk Q6).
-5. **Missing or blank article titles return 422.**
-   - **Change:** these requests now get a normal 422 "can't be empty" error.
-   - **Reason:** the original returned 500 from the duplicate-title validator. The duplicate check is now skipped for blank titles, and the NotBlank check reports the error instead (Quirk Q7).
-6. **Unauthenticated GraphQL `feed` returns an error.**
-   - **Change:** the query returns an authentication error with `errorType INTERNAL`.
-   - **Reason:** the original crashed with a `NullPointerException`. `FindUserFeedWithCursor(nil user)` now returns `ErrUnauthenticated`.
-7. **An empty GraphQL cursor string means "no cursor".**
-   - **Change:** `""` is treated as no cursor. Non-numeric cursors still produce an error.
-   - **Reason:** the original threw `NumberFormatException` on `""`. Go strings cannot be null, so `""` stands in for Java's `null` (plan Phase 3, `ParseDateTimeCursor`).
-8. **Generic GraphQL errors have a fixed message.**
-   - **Change:** they use a fixed message with `errorType INTERNAL` and no Java exception class-name prefix.
-   - **Reason:** there are no Java classes in the Go runtime.
-9. **Validation messages come in a fixed order.**
-   - **Change:** multiple messages for one field are always emitted as NotBlank, then format, then duplicate.
-   - **Reason:** Go emits them in declaration order. In the original the order was unspecified (Quirk Q9).
-10. **New endpoint: `GET /healthz`.**
-    - **Change:** an unauthenticated endpoint that returns `ok`.
-    - **Reason:** a liveness probe for running the binary under an orchestrator. The plan does not mention it; it was inferred.
+Each change from the original Spring codebase is listed with its reason.
 
-### Infrastructure changes
+| # | Change | Reason |
+|---|---|---|
+| 1 | Updating a user's password through `PUT /user` or the GraphQL `updateUser` mutation now stores the password **hashed**. The original stored the new password in plain text, so that user could never log in again. | Quirk Q1 in the plan. This is the one deliberate behaviour fix, and the plan says it **should be confirmed with the owner**. |
+| 2 | The personal feed (offset and cursor variants) now paginates by article ID first and loads tags afterwards. Pages are no longer cut short and tag lists are no longer truncated. The response shape is unchanged. | Quirk Q4. The original applied `LIMIT` to joined tag rows, which truncated both tags and pages. |
+| 3 | GraphQL comment pagination (`Article.comments`) now applies `LIMIT limit+1`. | Quirk Q5. The original comment cursor query had no `LIMIT`, so it could return the wrong number of rows and wrong `hasNext`/`hasPrevious` values. |
+| 4 | Creating an article with no `tagList` (REST or GraphQL) succeeds with an empty tag list. The original returned HTTP 500. | Quirk Q6. The Java code threw a `NullPointerException` on a null `tagList`. |
+| 5 | Creating an article with a missing or blank title returns a normal 422 "can't be empty" error. The original returned 500 from the duplicate-title validator. | Quirk Q7. The duplicate check is skipped for blank titles, and `NotBlank` reports the error instead. |
+| 6 | The GraphQL `feed` query with no authenticated user returns an authentication error (`errorType INTERNAL`). The original crashed. | Plan section *ArticleQueryService*: `FindUserFeedWithCursor(nil user)` returns `ErrUnauthenticated` instead of causing an NPE. |
+| 7 | An empty GraphQL pagination cursor string (`""`) is treated as "no cursor". Non-numeric cursors still produce an error. | Go strings cannot be null, so `""` stands in for Java's `null` (plan Phase 3, `ParseDateTimeCursor`). The original threw `NumberFormatException` on `""`. |
+| 8 | Generic GraphQL errors no longer carry the Java exception class-name prefix. They use a fixed message with `errorType INTERNAL`. | Plan section *GraphQL errors*. There are no Java classes in the Go runtime. |
+| 9 | Multiple validation messages for the same field are emitted in a fixed order: NotBlank, then format, then duplicate. In the original the order was unspecified. | Quirk Q9. Go emits messages in declaration order. |
+| 10 | The MyBatis cache and statement-timeout settings are gone. The 3000 s statement timeout is meant to be applied per request through a context timeout (`DB_STATEMENT_TIMEOUT`). | Plan Phase 0. MyBatis-specific settings have no equivalent once MyBatis is removed. See [Manual review](#manual-review-required). |
+| 11 | The Gradle `clean` task, which deleted the SQLite database file, is replaced by a Makefile `clean` target. | Plan Phase 0. Gradle is replaced by the Go toolchain. **No Makefile is included in this repository**, so this target is currently unavailable. |
+| 12 | Spring HATEOAS support is dropped. | Plan section 4. The `spring-boot-starter-hateoas` dependency was unused. |
+| 13 | New unauthenticated `GET /healthz` endpoint that returns `ok`. | Liveness probe for running the Go binary under an orchestrator. This was not mentioned in the plan; the reason is inferred. |
 
-- **MyBatis cache and statement-timeout settings are removed.**
-  - **Change:** the 3000 s statement timeout is meant to be applied per request through a context timeout (`DB_STATEMENT_TIMEOUT`).
-  - **Reason:** MyBatis-specific settings have no equivalent once MyBatis is removed (plan Phase 0).
-- **The Gradle `clean` task is replaced by a Makefile `clean` target.**
-  - **Change:** the Gradle task deleted the SQLite database file; the plan replaces it with a Makefile target.
-  - **Reason:** Gradle is replaced by the Go toolchain (plan Phase 0).
-  - **Note:** no Makefile exists in this repository yet, so this target is not available.
-- **Spring HATEOAS is dropped.**
-  - **Reason:** the `spring-boot-starter-hateoas` dependency was unused (plan section 4).
-- **SQLite is replaced by PostgreSQL.** See [Database](#database).
+### Other structural changes
+
+- **Database:** the database moved from SQLite to PostgreSQL. See [Database](#database).
+- **Password hashing:** password hashing uses an iterated, salted SHA-512 encoder (10,000 iterations) defined in `cmd/server/router.go`. It replaces Spring Security's BCrypt because `golang.org/x/crypto` is not a module dependency.
+- **Configuration:** `application.properties` is replaced by environment variables (`internal/config`). The defaults are copied from the original file.
 
 ---
 
 ## Known limitations
 
+### Source files intentionally not translated (31, per the agreed plan)
+
+| Source | Replacement or reason |
+|---|---|
+| `src/main/resources/mapper/*.xml` (10 files) | Their SQL is ported into `internal/store`. |
+| The `TransferData` mapper XML file | Its result maps are ported as row scanning in Go. |
+| MyBatis mapper interfaces for comments, article favorites, users and articles | Their SQL is ported into the `internal/store` repositories (`comment_repo.go`, `favorite_repo.go`, `user_repo.go`, `article_repo.go`). |
+| MyBatis read services: `UserRelationshipQueryService`, `TagReadService`, `UserReadService`, `ArticleFavoritesReadService`, `ArticleReadService`, `CommentReadService` | Their SQL is ported to Go. The plan placed these in separate `internal/store` files; in this tree the read-side queries live in the adapters in `cmd/server/router.go`. |
+| `DuplicatedArticleConstraint`, `DuplicatedEmailConstraint`, `DuplicatedUsernameConstraint` | These are annotation types with no Go meaning. Only the validator logic survives. |
+| The page-cursor and node abstract classes | The abstract hierarchy is collapsed into a single `Node` interface (`Cursor() time.Time`) plus `FormatCursor`. |
+| The Jackson customizations | No serializer framework is needed. Its behaviour moves into a `JSONTime` type. |
+| The article favorite-count class | Replaced by `map[string]int`. |
+| The field-error, error-resource and error-resource serializer classes | Not needed as classes. Their behaviour moves into `internal/httpapi/errors.go`. |
+
+### Runtime limitations
+
 - **GraphQL is not served.**
-  - `internal/graphql` and `src/main/resources/schema/schema.graphqls` exist, but `cmd/server/router.go` mounts only the REST handlers.
-  - No GraphQL endpoint is reachable from the running server.
-  - The GraphQL-related migration notes above describe the code in `internal/graphql`, not a live endpoint.
-- **Existing password hashes are incompatible.**
-  - Passwords are hashed with an iterated, salted SHA-512 scheme (`passwordHasher` in `cmd/server/router.go`), because `golang.org/x/crypto/bcrypt` is not a dependency.
-  - BCrypt hashes produced by the original Java app will not match, so users migrated from an existing database cannot log in until their passwords are reset.
-- **`PORT` is ignored.** The listen address is hard-coded to `:8080` in `cmd/server/main.go`.
-- **The schema is not applied automatically.** Neither the binary nor `docker-compose.yml` applies `V1__create_tables.sql`.
-- **A database ping failure is not fatal.** The server starts anyway and logs `database ping failed; continuing`. Requests then fail at query time.
-- **The documented Makefile `clean` target does not exist.**
-- **Some modules were intentionally not translated.** These 31 source files were left out per the agreed plan; none were deemed unmigrable:
-  - **10 MyBatis mapper XML files.** Their SQL is ported into `internal/store`.
-  - **A MyBatis result-map XML file.** Its result maps are ported as row scanning in Go.
-  - **4 MyBatis mapper interfaces.** Their SQL is ported into `internal/store/comment_repo.go`, `favorite_repo.go`, `user_repo.go` and `article_repo.go`.
-  - **MyBatis read services** (`UserRelationshipQueryService`, `TagReadService`, `UserReadService`, `ArticleFavoritesReadService`, `ArticleReadService`, `CommentReadService`).
-    - The plan assigned their SQL to `internal/store`.
-    - In this tree, the read-side SQL is in the adapters in `cmd/server/router.go`.
-  - **3 constraint annotations** (`DuplicatedArticleConstraint`, `DuplicatedEmailConstraint`, `DuplicatedUsernameConstraint`). They have no Go meaning; only the validator logic survives.
-  - **The 2 page-cursor classes.** The abstract hierarchy is collapsed into a single `Node` interface (`Cursor() time.Time`) plus `FormatCursor`.
-  - **The Jackson customization class.**
-    - No serializer framework is needed.
-    - The plan moves this behaviour into a JSON time type in `internal/app`, but the file the plan names is not present in this tree.
-  - **The favorite-count class.** Replaced by `map[string]int`.
-  - **The 3 error-resource classes.** Their behaviour moves into `internal/httpapi/errors.go`.
+  - `internal/graphql` contains resolvers, mutations and tests, and `src/main/resources/schema/schema.graphqls` is kept.
+  - However, `cmd/server/router.go` registers only the REST handlers, and `go.mod` has no GraphQL server library.
+  - The GraphQL behaviour changes listed above therefore describe the package code, not a reachable endpoint.
+- **`PORT` is ignored for listening.** The server always binds `:8080`. `internal/config` provides `Config.Addr()`, but `cmd/server/main.go` does not use it.
+- **Existing password hashes are incompatible.** Users whose passwords were hashed with BCrypt by the original application cannot log in with the new SHA-512 encoder.
+- **The committed default JWT secret.** If `JWT_SECRET` is unset, the secret that was committed in the original project is used.
+- **No schema migration tooling.** Startup only runs `CREATE TABLE IF NOT EXISTS`. Later schema changes to existing tables are not applied automatically.
 
 ---
 
 ## Manual review required
 
-### Issues found in the Go code
-
-- **Q1 password hashing:** confirm the behaviour change with the project owner, as the plan requires.
-- **Statement timeout:**
-  - `cmd/server/router.go` loads `cfg.StatementTimeout` but never passes it anywhere.
-  - Verify that the 3000 s per-request context timeout is actually applied.
-  - Likewise, `cfg.SQLLogLevel` is parsed but not visibly used.
-- **`PORT` wiring:** decide whether `main.go` should use `cfg.Addr()` instead of the hard-coded `":8080"`.
-- **`app.NewArticleCommandService(articleRepo, nil)`** in `cmd/server/router.go`: verify that passing `nil` as the second argument is intended and safe.
-- **GraphQL:** decide whether and how to mount `internal/graphql`.
-- **Password hashing:** decide between keeping the SHA-512 scheme and adding bcrypt for compatibility with existing data.
-- **Schema provisioning:** decide how `V1__create_tables.sql` should be applied in each environment.
-
 ### Low-confidence modules
 
-The migration flagged these original Spring source files as low confidence. Their Go counterparts are listed below; review them against the original behaviour. `src/main/resources/application.properties` refers to the original repository and does not exist in this one.
+The following original modules were flagged as low confidence. Verify their Go counterparts:
 
-**Configuration and security**
-- `src/main/resources/application.properties`
-- `internal/httpapi/middleware.go`
-
-**REST API and error handling**
+**REST API and security**
 - `internal/httpapi/users.go`
 - `internal/httpapi/current_user.go`
 - `internal/httpapi/articles.go`
 - `internal/httpapi/article.go`
 - `internal/httpapi/comments.go`
+- `internal/httpapi/middleware.go`
 - `internal/httpapi/errors.go`
 - `internal/httpapi/no_authorization.go`
 
@@ -338,25 +323,38 @@ The migration flagged these original Spring source files as low confidence. Thei
 - `internal/graphql/article_mutation.go`
 - `internal/graphql/comment.go`
 - `internal/graphql/profile.go`
-- `internal/graphql/relation_mutation.go`
 - `internal/graphql/user.go`
 - `internal/graphql/tags.go`
+- `internal/graphql/relation_mutation.go`
 - `internal/graphql/user_mutation.go`
 - `internal/graphql/errors.go`
 
 **Application layer**
 - `internal/app/article_query.go`
 - `internal/app/paging.go`
-- `internal/app/dto.go`
+- `internal/app/datetime_cursor.go`
 - `internal/app/article_command.go`
 - `internal/app/new_article_param.go`
 - `internal/app/user_service.go`
 - `internal/app/update_user_param.go`
 - `internal/app/register_validation.go`
-- `internal/app/validate_user.go`
+- `internal/app/dto.go`
 
 **Domain and persistence**
 - `internal/core/user.go`
 - `internal/core/article.go`
 - `internal/core/comment.go`
 - `internal/store/user_repo.go`
+
+**Configuration**
+- `src/main/resources/application.properties`
+
+### Specific points to check
+
+1. **Password-update fix (Q1).** Confirm with the project owner that hashing passwords on `PUT /user` and `updateUser` is the intended behaviour.
+2. **Password encoder.** Decide whether the SHA-512 encoder in `cmd/server/router.go` is acceptable, or whether `golang.org/x/crypto/bcrypt` should be added. Bcrypt would restore compatibility with existing hashes and use a stronger algorithm.
+3. **Statement timeout.** `cmd/server/router.go` does not visibly use `cfg.StatementTimeout`. Verify that the per-request context timeout described in migration note 10 is actually applied.
+4. **`app.NewArticleCommandService(articleRepo, nil)`.** The second dependency is passed as `nil` in `cmd/server/router.go`. Confirm this is safe for every code path.
+5. **GraphQL wiring.** Decide whether to mount `internal/graphql`, which needs a GraphQL server library, or to remove it.
+6. **`PORT` handling.** Wire `Config.Addr()` into `cmd/server/main.go` if a configurable port is required.
+7. **Missing Makefile.** Add the Makefile `clean` target described in the plan, or drop that requirement.
