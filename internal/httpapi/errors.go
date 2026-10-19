@@ -6,9 +6,10 @@ import (
 	"net/http"
 )
 
-// invalidAuthenticationMessage is the fixed, deliberately vague message for
-// every failed login. It never says whether the email or the password was
-// wrong, so callers cannot use it to find out which emails are registered.
+// invalidAuthenticationMessage is the fixed message for every failed login,
+// copied from the source exception. It never says whether the email or the
+// password was wrong, so callers cannot use it to find out which emails are
+// registered.
 const invalidAuthenticationMessage = "invalid email or password"
 
 // ErrInvalidAuthentication signals a failed authentication attempt, such as
@@ -24,10 +25,9 @@ const invalidAuthenticationMessage = "invalid email or password"
 // MIGRATION_NOTE: the source used an unchecked InvalidAuthenticationException
 // that CustomizeExceptionHandler turned into a 422 response. In Go it is a
 // returned sentinel error, mapped to HTTP by ErrorHandlerFunc and WriteError.
-// The agreed plan also names core.ErrInvalidCredentials for this case. If
-// that symbol exists, MANUAL REVIEW: alias one sentinel to the other, or add
-// it to the errors.Is check in invalidAuthenticationBody, so only one
-// sentinel is in use.
+// If a core.ErrInvalidCredentials sentinel also exists, MANUAL REVIEW: alias
+// one to the other, or add it to the errors.Is check in
+// invalidAuthenticationBody, so only one sentinel is in use.
 var ErrInvalidAuthentication = errors.New(invalidAuthenticationMessage)
 
 // ErrResourceNotFound signals that a requested resource (article, comment,
@@ -45,7 +45,7 @@ type ErrorHandlerFunc func(w http.ResponseWriter, r *http.Request) error
 // writes the matching error response with WriteError.
 func (f ErrorHandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if err := f(w, r); err != nil {
-		WriteError(w, err)
+		WriteError(w, r, err)
 	}
 }
 
@@ -57,24 +57,23 @@ func (f ErrorHandlerFunc) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 //   - anything else            → 500 with a generic message, so internal
 //     details are never exposed
 //
-// A nil err writes nothing.
-func WriteError(w http.ResponseWriter, err error) {
+// The request is passed through so that delegated writers such as
+// WriteAuthzError have access to it. A nil err writes nothing.
+func WriteError(w http.ResponseWriter, r *http.Request, err error) {
 	if err == nil {
 		return
 	}
 	if body, ok := invalidAuthenticationBody(err); ok {
-		writeErrorBody(w, http.StatusUnprocessableEntity, body)
+		writeJSONError(w, http.StatusUnprocessableEntity, body)
 		return
 	}
 	switch {
 	case errors.Is(err, ErrNoAuthorization):
-		// MIGRATION_NOTE: assumes WriteAuthzError(w, err) from
-		// no_authorization.go. MANUAL REVIEW: check its signature.
-		WriteAuthzError(w, err)
+		WriteAuthzError(w, r, err)
 	case errors.Is(err, ErrResourceNotFound):
 		w.WriteHeader(http.StatusNotFound)
 	default:
-		writeErrorBody(w, http.StatusInternalServerError,
+		writeJSONError(w, http.StatusInternalServerError,
 			map[string]string{"message": http.StatusText(http.StatusInternalServerError)})
 	}
 }
@@ -90,10 +89,10 @@ func invalidAuthenticationBody(err error) (map[string]string, bool) {
 	return map[string]string{"message": invalidAuthenticationMessage}, true
 }
 
-// writeErrorBody writes body as JSON with the given status code. If encoding
+// writeJSONError writes body as JSON with the given status code. If encoding
 // fails after the header has been sent, the status cannot be changed, so the
 // failure is dropped.
-func writeErrorBody(w http.ResponseWriter, status int, body any) {
+func writeJSONError(w http.ResponseWriter, status int, body any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(body)
